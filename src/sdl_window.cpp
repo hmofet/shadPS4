@@ -184,7 +184,9 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
     Input::ControllerOutput::LinkJoystickAxes();
     Input::ParseInputConfig(std::string(Common::ElfInfo::Instance().GameSerial()));
 
-    if (EmulatorSettings.IsBackgroundControllerInput()) {
+    // With PSVR the player is in the headset and the window is rarely focused, so controllers
+    // must keep working in the background.
+    if (EmulatorSettings.IsBackgroundControllerInput() || EmulatorSettings.IsPsvrEnabled()) {
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     }
 }
