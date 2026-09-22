@@ -348,11 +348,13 @@ static u64 GetGpuClock64() {
 /// GPU time a guest measures shrinks or grows while the counter stays monotonic.
 u64 ScaleGpuTime(u64 tsc);
 
-static u64 GetGpuPerfCounter() {
+/// Core clock ticks at host TSC time `tsc`. Callers sample the TSC before any readback drain
+/// so the drain, which is emulator overhead, is not counted as GPU time.
+static u64 GetGpuPerfCounter(u64 tsc) {
     const auto cpu_freq = Libraries::Kernel::sceKernelGetTscFrequency();
     const auto gpu_freq = Libraries::GnmDriver::sceGnmGetGpuCoreClockFrequency();
 
-    const auto cpu_cycles = ScaleGpuTime(Libraries::Kernel::sceKernelReadTsc());
+    const auto cpu_cycles = ScaleGpuTime(tsc);
     const auto gpu_cycles = Common::MultiplyAndDivide64(cpu_cycles, gpu_freq, cpu_freq);
 
     return gpu_cycles;
@@ -469,7 +471,7 @@ struct PM4CmdEventWriteEop {
         return data_lo | u64(data_hi) << 32;
     }
 
-    void SignalFence(auto&& write_mem, auto&& signal_irq) const {
+    void SignalFence(auto&& write_mem, auto&& signal_irq, u64 tsc) const {
         u32* address = Address<u32>();
         switch (data_sel.Value()) {
         case DataSelect::None: {
@@ -488,7 +490,7 @@ struct PM4CmdEventWriteEop {
             break;
         }
         case DataSelect::PerfCounter: {
-            write_mem(address, GetGpuPerfCounter(), sizeof(u64));
+            write_mem(address, GetGpuPerfCounter(tsc), sizeof(u64));
             break;
         }
         default: {
@@ -953,7 +955,7 @@ struct PM4CmdReleaseMem {
         return data_lo | u64(data_hi) << 32;
     }
 
-    void SignalFence(auto&& signal_irq, auto&& gds_to_mem) const {
+    void SignalFence(auto&& signal_irq, auto&& gds_to_mem, u64 tsc) const {
         switch (data_sel.Value()) {
         case DataSelect::Data32Low: {
             *Address<u32*>() = DataDWord();
@@ -968,7 +970,7 @@ struct PM4CmdReleaseMem {
             break;
         }
         case DataSelect::PerfCounter: {
-            *Address<u64*>() = GetGpuPerfCounter();
+            *Address<u64*>() = GetGpuPerfCounter(tsc);
             break;
         }
         case DataSelect::GdsMemStore: {

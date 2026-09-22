@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <atomic>
+
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -69,6 +72,30 @@ u64 ScaleGpuTime(u64 tsc) {
     const s64 elapsed = static_cast<s64>(tsc - base);
     return base + static_cast<u64>(static_cast<s64>(static_cast<double>(elapsed) * scale));
 }
+
+/// Logs PerfCounter timestamp writes in bursts, with the delta the guest sees between
+/// consecutive writes and the readback drain that was kept out of it.
+struct GpuTimestampTrace {
+    std::atomic<u64> count{0};
+    std::atomic<u64> previous{0};
+
+    void Write(const char* packet, const void* address, u64 tsc, u64 drain_end_tsc) {
+        const u64 value = GetGpuPerfCounter(tsc);
+        const u64 last = previous.exchange(value, std::memory_order_relaxed);
+        const u64 n = count.fetch_add(1, std::memory_order_relaxed);
+        if (n % 512 >= 16) {
+            return;
+        }
+        const double gpu_freq = Libraries::GnmDriver::sceGnmGetGpuCoreClockFrequency();
+        const double tsc_freq = Libraries::Kernel::sceKernelGetTscFrequency();
+        const s64 delta = last != 0 ? static_cast<s64>(value - last) : 0;
+        LOG_DEBUG(Render, "[#{}] {} PerfCounter {} = {} (+{:.3f} ms guest), drain {:.3f} ms", n,
+                  packet, fmt::ptr(address), value, delta * 1000.0 / gpu_freq,
+                  (drain_end_tsc - tsc) * 1000.0 / tsc_freq);
+    }
+};
+static GpuTimestampTrace eop_trace;
+static GpuTimestampTrace release_mem_trace;
 
 static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset) {
     if (offset > span.size()) {
@@ -692,6 +719,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
+                // The timestamp is taken before the readback drain, the fence is still written
+                // after the readback data.
+                const u64 tsc = Libraries::Kernel::sceKernelReadTsc();
                 if (rasterizer) {
                     rasterizer->ProcessDownloadImages();
                 }
@@ -702,7 +732,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             memcpy(address, &data, num_bytes);
                         }
                     },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
+                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); },
+                    tsc);
+                if (event_eop->data_sel == DataSelect::PerfCounter) {
+                    eop_trace.Write("EOP", event_eop->Address<u32>(), tsc,
+                                    Libraries::Kernel::sceKernelReadTsc());
+                }
                 break;
             }
             case PM4ItOpcode::DmaData: {
@@ -1116,6 +1151,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::ReleaseMem: {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
+            // As for EventWriteEop: timestamp before the readback drain, fence after the data.
+            const u64 tsc = Libraries::Kernel::sceKernelReadTsc();
             if (rasterizer) {
                 rasterizer->ProcessDownloadImages();
             }
@@ -1125,7 +1162,12 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 },
                 [this](VAddr dst, u16 gds_index, u16 num_dwords) {
                     rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false, true);
-                });
+                },
+                tsc);
+            if (release_mem->data_sel == DataSelect::PerfCounter) {
+                release_mem_trace.Write("ReleaseMem", release_mem->Address<void*>(), tsc,
+                                        Libraries::Kernel::sceKernelReadTsc());
+            }
             break;
         }
         case PM4ItOpcode::EventWrite: {
