@@ -142,6 +142,17 @@ void SubmitEyeTextures(u64 param, u64 pose_param) {
         return;
     }
     const VR::HmdFrameInfo info = ReadFrameInfo(param, pose_param);
+    // The game resizes its eye target on its own (dynamic resolution); log every change.
+    static u32 last_width = 0;
+    static u32 last_height = 0;
+    static u64 frame = 0;
+    ++frame;
+    if (left.width + 1 != last_width || left.height + 1 != last_height) {
+        LOG_INFO(Lib_Hmd, "eye size {}x{} -> {}x{} at frame {}", last_width, last_height,
+                 left.width + 1, left.height + 1, frame);
+        last_width = left.width + 1;
+        last_height = left.height + 1;
+    }
     VR_TRACE(Lib_Hmd,
              "  eyes: {:#x} {}x{} layer {} / {:#x} layer {}; pose {} ({:.3f},{:.3f},{:.3f}) "
              "t={}; fov {}",
