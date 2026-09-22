@@ -337,16 +337,16 @@ enum class InterruptSelect : u32 {
     IrqUndocumented = 3,
 };
 
-static u64 GetGpuClock64() {
-    auto now = std::chrono::high_resolution_clock::now();
-    auto duration = now.time_since_epoch();
-    auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
-    return static_cast<u64>(ticks);
-}
-
 /// Scales host TSC time by the gpu_time_scale setting around the first sample, so the elapsed
 /// GPU time a guest measures shrinks or grows while the counter stays monotonic.
 u64 ScaleGpuTime(u64 tsc);
+
+/// The GCN global counter runs at the 100 MHz reference clock, not in nanoseconds.
+static u64 GetGpuClock64(u64 tsc) {
+    constexpr u64 RefClockFrequency = 100'000'000;
+    const auto cpu_freq = Libraries::Kernel::sceKernelGetTscFrequency();
+    return Common::MultiplyAndDivide64(ScaleGpuTime(tsc), RefClockFrequency, cpu_freq);
+}
 
 /// Core clock ticks at host TSC time `tsc`. Callers sample the TSC before any readback drain
 /// so the drain, which is emulator overhead, is not counted as GPU time.
@@ -486,7 +486,7 @@ struct PM4CmdEventWriteEop {
             break;
         }
         case DataSelect::GpuClock64: {
-            write_mem(address, GetGpuClock64(), sizeof(u64));
+            write_mem(address, GetGpuClock64(tsc), sizeof(u64));
             break;
         }
         case DataSelect::PerfCounter: {
@@ -966,7 +966,7 @@ struct PM4CmdReleaseMem {
             break;
         }
         case DataSelect::GpuClock64: {
-            *Address<u64*>() = GetGpuClock64();
+            *Address<u64*>() = GetGpuClock64(tsc);
             break;
         }
         case DataSelect::PerfCounter: {
