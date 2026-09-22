@@ -5,6 +5,7 @@
 
 #include <array>
 #include <memory>
+#include <string>
 // Same Vulkan configuration as video_core/renderer_vulkan/vk_common.h, so the result does not
 // depend on which of the two headers a file includes first.
 #ifndef VK_ENABLE_BETA_EXTENSIONS
@@ -61,6 +62,10 @@ public:
     // Creates the instance and finds a head-mounted system. False means no usable runtime or
     // headset, and the caller should fall back to another pose source.
     bool Initialize();
+
+    // Friendly name of the headset's audio output device, as the host audio APIs list it, when
+    // the runtime reports one (XR_OCULUS_audio_device_guid, Windows only). Empty otherwise.
+    const std::string& GetAudioOutputDevice() const;
 
     // Vulkan interop. The emulator creates its instance and device through these so the runtime
     // can add what it needs, and uses the physical device the runtime is attached to.

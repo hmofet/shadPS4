@@ -33,6 +33,7 @@
 #include "core/libraries/audio/audioout_backend.h"
 #include "core/libraries/audio/openal_manager.h"
 #include "core/libraries/kernel/threads.h"
+#include "core/vr/vr_service.h"
 
 // SIMD support detection
 #if defined(__x86_64__) || defined(_M_X64)
@@ -368,15 +369,24 @@ private:
     }
 
     std::string GetDeviceName(OrbisAudioOutPort type) const {
-        switch (type) {
-        case OrbisAudioOutPort::Main:
-        case OrbisAudioOutPort::Bgm:
-            return EmulatorSettings.GetOpenALMainOutputDevice();
-        case OrbisAudioOutPort::PadSpk:
+        if (type == OrbisAudioOutPort::PadSpk) {
             return EmulatorSettings.GetOpenALPadSpkOutputDevice();
-        default:
-            return EmulatorSettings.GetOpenALMainOutputDevice();
         }
+        const std::string name = EmulatorSettings.GetOpenALMainOutputDevice();
+        if (name.empty() || name == "Default Device") {
+            // In PSVR mode the game's main, background and 3D audio belong in the headset,
+            // whatever the host default is.
+            // OpenAL may list it with a prefix ("OpenAL Soft on ..."), so match the end.
+            const std::string headset = VR::GetHeadsetAudioDevice();
+            if (!headset.empty()) {
+                for (const std::string& device : OpenALDevice::GetAvailableDevices()) {
+                    if (device.ends_with(headset)) {
+                        return device;
+                    }
+                }
+            }
+        }
+        return name;
     }
 
     void UpdateVolumeIfChanged() {

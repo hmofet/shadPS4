@@ -6,6 +6,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
+#include "core/vr/vr_service.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -213,8 +214,14 @@ void Swapchain::FindPresentMode() {
     }
 
     if (std::ranges::find(modes, present_mode) == modes.cend()) {
-        // FIFO is guaranteed to be supported by the Vulkan spec.
-        constexpr auto fallback = vk::PresentModeKHR::eFifo;
+        // FIFO is guaranteed to be supported by the Vulkan spec. With a headset the window is
+        // only a mirror, and FIFO would hold the present thread, which also drives the 120 Hz
+        // headset vblank, to the monitor's refresh rate; tearing in the mirror is harmless.
+        const bool mirror_only =
+            VR::IsPsvrEnabled() &&
+            std::ranges::find(modes, vk::PresentModeKHR::eImmediate) != modes.cend();
+        const auto fallback =
+            mirror_only ? vk::PresentModeKHR::eImmediate : vk::PresentModeKHR::eFifo;
         LOG_WARNING(Render, "Requested present mode {} is not supported, falling back to {}.",
                     vk::to_string(present_mode), vk::to_string(fallback));
         present_mode = fallback;

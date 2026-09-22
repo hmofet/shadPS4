@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <string>
 #include <string_view>
 #include "common/logging/log.h"
 #include "core/vr/hmd_frame.h"
@@ -57,6 +58,9 @@ bool IsPsvrEnabled();
 std::string_view GetPoseSourceName();
 HmdFov GetReportedFov();
 float GetIpd();
+// The headset's audio output device when the OpenXR runtime names one, else empty. The audio
+// output uses it for the main port while its device is left at "Default Device".
+std::string GetHeadsetAudioDevice();
 void GetPanelResolution(u32& width, u32& height);
 
 // Samples the head at `guest_time_us` (guest process time). With `is_render_pose`, the sample is

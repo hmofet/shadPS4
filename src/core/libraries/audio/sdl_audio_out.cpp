@@ -14,6 +14,7 @@
 #include "core/libraries/audio/audioout.h"
 #include "core/libraries/audio/audioout_backend.h"
 #include "core/libraries/kernel/threads.h"
+#include "core/vr/vr_service.h"
 
 // SIMD support detection
 #if defined(__x86_64__) || defined(_M_X64)
@@ -388,15 +389,19 @@ private:
     }
 
     std::string GetDeviceName(OrbisAudioOutPort type) const {
-        switch (type) {
-        case OrbisAudioOutPort::Main:
-        case OrbisAudioOutPort::Bgm:
-            return EmulatorSettings.GetSDLMainOutputDevice();
-        case OrbisAudioOutPort::PadSpk:
+        if (type == OrbisAudioOutPort::PadSpk) {
             return EmulatorSettings.GetSDLPadSpkOutputDevice();
-        default:
-            return EmulatorSettings.GetSDLMainOutputDevice();
         }
+        const std::string name = EmulatorSettings.GetSDLMainOutputDevice();
+        if (name.empty() || name == "Default Device") {
+            // In PSVR mode the game's main, background and 3D audio belong in the headset,
+            // whatever the host default is.
+            const std::string headset = VR::GetHeadsetAudioDevice();
+            if (!headset.empty()) {
+                return headset;
+            }
+        }
+        return name;
     }
 
     static constexpr float DOWNMIX_FRONT = 1.0f;

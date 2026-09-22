@@ -140,6 +140,18 @@ std::string_view GetPoseSourceName() {
     return Get().source.load()->Name();
 }
 
+std::string GetHeadsetAudioDevice() {
+    if (!IsPsvrEnabled()) {
+        return {};
+    }
+#ifdef ENABLE_OPENXR
+    if (OpenXrRuntime* xr = GetOpenXr(Get())) {
+        return xr->GetAudioOutputDevice();
+    }
+#endif
+    return {};
+}
+
 HmdFov GetReportedFov() {
     State& s = Get();
     HmdFov fov;

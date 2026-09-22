@@ -22,6 +22,11 @@
 #include <windows.h>
 // openxr_platform.h declares Win32 entry points that take IUnknown, which the lean header omits.
 #include <unknwn.h>
+#include <combaseapi.h>
+#include <mmdeviceapi.h>
+// Defines PKEY_Device_FriendlyName here rather than needing a library that exports it.
+#include <initguid.h>
+#include <functiondiscoverykeys_devpkey.h>
 #define XR_USE_PLATFORM_WIN32
 #else
 #include <time.h>
@@ -58,6 +63,45 @@ constexpr std::array<VkFormat, 4> PreferredFormats{
     VK_FORMAT_R8G8B8A8_UNORM,
     VK_FORMAT_B8G8R8A8_UNORM,
 };
+
+#ifdef _WIN32
+// Friendly name of the audio endpoint with the given Windows device ID (the string
+// XR_OCULUS_audio_device_guid returns), which is the name SDL and OpenAL list it under.
+std::string AudioEndpointName(const wchar_t* device_id) {
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    std::string name;
+    IMMDeviceEnumerator* enumerator = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                   IID_PPV_ARGS(&enumerator)))) {
+        IMMDevice* device = nullptr;
+        if (SUCCEEDED(enumerator->GetDevice(device_id, &device))) {
+            IPropertyStore* props = nullptr;
+            if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props))) {
+                PROPVARIANT value;
+                PropVariantInit(&value);
+                if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &value)) &&
+                    value.vt == VT_LPWSTR) {
+                    const int size = WideCharToMultiByte(CP_UTF8, 0, value.pwszVal, -1, nullptr,
+                                                         0, nullptr, nullptr);
+                    if (size > 1) {
+                        name.resize(size - 1);
+                        WideCharToMultiByte(CP_UTF8, 0, value.pwszVal, -1, name.data(), size,
+                                            nullptr, nullptr);
+                    }
+                }
+                PropVariantClear(&value);
+                props->Release();
+            }
+            device->Release();
+        }
+        enumerator->Release();
+    }
+    if (SUCCEEDED(init)) {
+        CoUninitialize();
+    }
+    return name;
+}
+#endif
 
 XrPosef ToXr(const Pose& p) {
     return {{p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w},
@@ -165,10 +209,58 @@ struct OpenXrRuntime::Impl {
 #else
     PFN_xrConvertTimespecTimeToTimeKHR convert_time = nullptr;
 #endif
+    std::string audio_output_device;
+    bool has_refresh_rate_ext = false;
 
     // Guards everything above against the game threads that sample poses while the presenter
     // thread runs the frame loop. Never held across xrWaitFrame.
     mutable std::mutex mutex;
+
+    // Asks for the highest headset refresh rate that is a multiple of 60 Hz. PSVR games run at
+    // 60 frames per second (reprojected to 120 Hz on a PSVR), and 60 fps on a 90 Hz display
+    // shows each frame for one, then two refreshes: judder, and xrWaitFrame pacing drops the
+    // game to 45 fps once a frame takes longer than two 90 Hz slots.
+    void RequestRefreshRate() {
+        if (!has_refresh_rate_ext) {
+            return;
+        }
+        PFN_xrEnumerateDisplayRefreshRatesFB enumerate = nullptr;
+        PFN_xrGetDisplayRefreshRateFB get = nullptr;
+        PFN_xrRequestDisplayRefreshRateFB request = nullptr;
+        if (!LoadFunction("xrEnumerateDisplayRefreshRatesFB", enumerate) ||
+            !LoadFunction("xrGetDisplayRefreshRateFB", get) ||
+            !LoadFunction("xrRequestDisplayRefreshRateFB", request)) {
+            return;
+        }
+        u32 count = 0;
+        if (!Check(enumerate(session, 0, &count, nullptr), "xrEnumerateDisplayRefreshRatesFB")) {
+            return;
+        }
+        std::vector<float> rates(count);
+        enumerate(session, count, &count, rates.data());
+        float current = 0.0f;
+        get(session, &current);
+        std::string listed;
+        float best = 0.0f;
+        for (const float rate : rates) {
+            listed += fmt::format("{}{:.0f}", listed.empty() ? "" : ", ", rate);
+            const float multiple = rate / 60.0f;
+            if (std::abs(multiple - std::round(multiple)) < 0.01f && rate > best) {
+                best = rate;
+            }
+        }
+        LOG_INFO(Lib_Hmd, "OpenXR: display refresh {:.0f} Hz, available {}", current, listed);
+        if (best == 0.0f) {
+            LOG_WARNING(Lib_Hmd,
+                        "OpenXR: no refresh rate is a multiple of 60 Hz; 60 fps will judder "
+                        "(enable 120 Hz in the headset's PC VR settings)");
+            return;
+        }
+        if (std::abs(best - current) > 0.5f &&
+            Check(request(session, best), "xrRequestDisplayRefreshRateFB")) {
+            LOG_INFO(Lib_Hmd, "OpenXR: requested {:.0f} Hz", best);
+        }
+    }
 
     bool Check(XrResult result, const char* what) const {
         if (XR_SUCCEEDED(result)) {
@@ -572,6 +664,16 @@ bool OpenXrRuntime::Initialize() {
     } else {
         LOG_WARNING(Lib_Hmd, "OpenXR: runtime lacks {}, pose timing will be approximate", time_ext);
     }
+    d.has_refresh_rate_ext = has_ext(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    if (d.has_refresh_rate_ext) {
+        enabled.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    }
+#ifdef _WIN32
+    const bool has_audio_ext = has_ext(XR_OCULUS_AUDIO_DEVICE_GUID_EXTENSION_NAME);
+    if (has_audio_ext) {
+        enabled.push_back(XR_OCULUS_AUDIO_DEVICE_GUID_EXTENSION_NAME);
+    }
+#endif
 
     XrInstanceCreateInfo create_info{
         .type = XR_TYPE_INSTANCE_CREATE_INFO,
@@ -628,7 +730,22 @@ bool OpenXrRuntime::Initialize() {
         d.LoadFunction("xrConvertTimespecTimeToTimeKHR", d.convert_time);
 #endif
     }
+#ifdef _WIN32
+    // The headset's own audio device. The Windows default output is often something else (a
+    // DualSense's speaker, the desk speakers), so the game would play where the player is not.
+    PFN_xrGetAudioOutputDeviceGuidOculus get_audio_output = nullptr;
+    wchar_t audio_id[XR_MAX_AUDIO_DEVICE_STR_SIZE_OCULUS]{};
+    if (has_audio_ext && d.LoadFunction("xrGetAudioOutputDeviceGuidOculus", get_audio_output) &&
+        d.Check(get_audio_output(d.instance, audio_id), "xrGetAudioOutputDeviceGuidOculus")) {
+        d.audio_output_device = AudioEndpointName(audio_id);
+        LOG_INFO(Lib_Hmd, "OpenXR: headset audio device '{}'", d.audio_output_device);
+    }
+#endif
     return true;
+}
+
+const std::string& OpenXrRuntime::GetAudioOutputDevice() const {
+    return impl->audio_output_device;
 }
 
 VkResult OpenXrRuntime::CreateVulkanInstance(const VkInstanceCreateInfo* create_info,
@@ -731,6 +848,7 @@ bool OpenXrRuntime::CreateSession(VkInstance instance, VkPhysicalDevice physical
     LOG_INFO(Lib_Hmd, "OpenXR: session created, recommended eye size {}x{}",
              d.config_views[0].recommendedImageRectWidth,
              d.config_views[0].recommendedImageRectHeight);
+    d.RequestRefreshRate();
     if (!d.CreateActions()) {
         // Input is optional: the PC gamepad still works.
         LOG_WARNING(Lib_Hmd, "OpenXR: controller input unavailable");
