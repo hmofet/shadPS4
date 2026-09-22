@@ -265,6 +265,7 @@ its own dynamic resolution, and `Lib.Hmd` now logs every size change. The contro
 the EOP `PerfCounter` timestamps, so this is not a PSVR support problem: stock shadPS4 renders
 what the game asks for. Work on raising the game's choice lives on the `quality-override`
 branch, kept apart from PSVR support. The table below is from the two-size reading.
+Measurements: QUALITY-OVERRIDE-PLAN.md, "Phase 0 results".
 
 The screenshot hotkey saves the eye exactly as the game rendered it, and the `eyes:` trace line
 reports the size the game itself put in the eye T#, so both agree: the game, not the emulator,

@@ -27,7 +27,8 @@ what to use instead.
   `EventWriteEos` and `ReleaseMem` (src/video_core/amdgpu/liverpool.cpp:674, :654, :1098) the
   processor first calls `rasterizer->ProcessDownloadImages()`, which drains the GPU, and only
   then samples the timestamp in `SignalFence`. The 250 ms per second of drain time measured in
-  a race is therefore counted as GPU time by the game.
+  a race is therefore counted as GPU time by the game. *(Phase 0 measured this and it is not
+  true for WipEout: the drain at these sites is under 0.2 ms. See Phase 0 results.)*
 - **`GpuClock64` is in the wrong units.** `GetGpuClock64()` returns nanoseconds since the epoch;
   the GCN global counter is a reference-clock counter (100 MHz class). WipEout does not read it,
   but any engine that does (UE4's GPU profiler reads both kinds) sees a clock ten times too fast
@@ -190,12 +191,80 @@ screen-space effects and texture aliasing. It is the only lever for games that h
 sizes and resist patching, and it should wait until Phases 1 and 2 have shown which games those
 actually are.
 
+## Phase 0 results (2026-09-22, MINI, Quest 3 over Air Link)
+
+**Verdict: H1. WipEout's eye size is a continuous dynamic-resolution controller driven by the
+EOP `PerfCounter` timestamps.** With `gpu_time_scale` 0.1 the race holds the full eye size.
+Phase 2 (a policy patch) is not needed for the resolution; Phase 1 is the fix.
+
+Setup: build 3d00984b (Phase 1 steps 1 to 3 plus the diagnostics below), Meta runtime 1.207.0
+over **Air Link, not the cable** (recommended eye size 1600x1712, 120 Hz), and another agent
+running an APK on the same headset during run 0b. Frame rates are therefore indicative only.
+
+| Run | `render_scale` | `gpu_time_scale` | Eye at START RACE | Eye in the race | Race frames/s |
+|---|---|---|---|---|---|
+| 0a | 2.8 | 1.0 | - | - | the game crashes during boot |
+| baseline | 1.4 | 1.0 | 1882x2117 | 944x1056, then creeping 1032 to 1328 wide, never back to full | 17 to 37 at full size, 59 once reduced |
+| 0b | 1.4 | 0.1 | 1882x2117 | full 1882x2117 for the whole race (two dips recovered in about 40 frames) | 40 to 48 |
+
+What the runs show:
+
+- **The game has many sizes, not two.** The steps seen are 944, 1032, 1112, 1192, 1264, 1328,
+  1400, 1456, 1520, 1576, 1632, 1680, 1736, 1784, 1832 and 1882 wide: 16 sizes from half
+  to full, each about 5% apart. The earlier "full or exactly half" reading came from the `eyes:`
+  trace, which samples one frame in 600. `hmd_reprojection.cpp` now logs every change.
+- **The controller drops hard and climbs one step every 3 frames when it has headroom.** At 0.1
+  it fell twice (to 1328 and to 944 wide, once each around loading and the race start) and was
+  back at full size 30 to 45 frames later. At 1.0 it fell to 944 and then climbed only a few
+  steps over the next minute, oscillating around 1000 to 1330 wide.
+- **0a: `render_scale` 2.8 crashes the game at boot** (access violation in the game's own
+  render thread, at 0xb852a0a, right after `sceHmdReprojectionSetOutputMinColor`). 1.4 boots
+  with the same build. The largest scale that boots is not known; 2.0 reached the menus in an
+  earlier session. With 0b in place the reason for 2.8 (landing the half step on the headset's
+  size) is gone anyway.
+- **Image in 0b:** the user reports it "looks much better" with visibly higher resolution, but
+  **something is wrong with the textures, especially on the track**. Not captured: F12 needs the
+  desktop window focused, and the retry with a controller binding (below) was cut short by an
+  Air Link problem. Suspects: the game ties texture LOD or streaming to its resolution level,
+  or reads the same timestamps for something time-based that a 10x fast clock breaks. Next
+  session: capture it, then try 0.3 and 0.5 to see whether it scales with the factor.
+
+What the game measures (0c, `Render` debug lines from `liverpool.cpp`):
+
+- **Two `PerfCounter` EOPs per frame, not four**, alternating a long and a short interval that
+  add up to the frame time. At 60 frames/s: about 9 to 11 ms and 5 to 7 ms. In the slow part
+  of the race at 1.0: about 21 to 34 ms and 0.4 to 7 ms. At 0.1 in the race: 1.9 to 2.3 ms and
+  0.04 ms guest time (20 ms and 0.4 ms real).
+- No `ReleaseMem` timestamps were written; the compute queues do not time anything.
+- **The readback drain is not inside these intervals.** The drain at the EOP sites measured at
+  most 0.018 ms per EOP at 1.0 and 0.14 ms at 0.1. The 250 ms per second stall in "Not fixed
+  yet" 2 happens elsewhere in the frame (the downloads are already processed by the time the
+  EOP packet is parsed). Phase 1 step 1 is correct but changes nothing measurable for WipEout;
+  the timestamps track the command processor's parse time, and the emulator's parse time
+  per frame is what the game budgets against. Section 1's third bullet is wrong for this game.
+- **`sceVideoOutGetFlipStatus` is called once per frame throughout, race included;
+  `sceVideoOutIsFlipPending` only 16 times, at boot.** Flip status is polled, but 0b shows the
+  timestamps alone are enough to move the controller.
+
+Code from this session (all on `psvr-openxr`):
+
+- `gpu.gpu_time_scale` (df8eea4d), applied around the first sample so the counters stay
+  monotonic; fixed at first use, clamped to 0.01 to 100.
+- EOP and ReleaseMem timestamps sampled before `ProcessDownloadImages` (f8ad294b), always on,
+  not a setting. `EventWriteEos` carries no timestamp and is unchanged.
+- `GpuClock64` as a 100 MHz reference-clock counter with the same scale (18d34840).
+- Diagnostics: `Render` debug lines for PerfCounter EOPs (16 of every 512), flip-status polling
+  at `Lib.VideoOut` debug (20846d73), and every eye-size change at `Lib.Hmd` info (3d00984b).
+- A controller binding for the game-only screenshot: `hotkey_capture_frame = back` in
+  `input_config/global.ini` (the DualSense Create button). No code; it also keeps sending the
+  touchpad click that `default.ini` maps to that button.
+
 ## 4. Settings this adds
 
 | Setting | Default | Effect | Acceptance test |
 |---|---|---|---|
-| `gpu.gpu_time_scale` | 1.0 | Scales elapsed GPU time reported by EOP timestamps | 0b: a race at 0.1 holds full size if H1 |
-| `gpu.timestamp_before_readback` | on | Samples EOP time before the readback drain | Per-eye deltas in the 0c trace drop by the drain time |
+| `gpu.gpu_time_scale` | 1.0 | Scales elapsed GPU time reported by EOP timestamps (PerfCounter and GpuClock64) | **Done, passed:** a WipEout race at 0.1 holds 1882x2117 (Phase 0 results); track textures look wrong, not yet explained |
+| (timestamp before readback) | always | Samples EOP time before the readback drain | **Done, built in rather than a setting.** No effect on WipEout: the drain at the EOP sites is under 0.2 ms |
 | `general.neo_mode` in the max profile | off | PS4 Pro paths | WipEout boots and runs a race in Neo mode |
 | `vr.render_scale = auto` | 1.4 | Panel scale from the runtime's eye size | `eyes:` line matches the swapchain size in a race |
 | `vr.eye_upscale` | fsr | Eye to swapchain through FsrPass | RCAS visibly sharper at equal size, no seam |
