@@ -57,7 +57,7 @@ to `desk`.
 | M0 Instrumentation | Done in code | Decoded traces for Hmd, HmdSetupDialog, VrTracker, Camera (virtual path). Every `sceHmdReprojection*` entry point logs its six argument registers plus a 64-byte dump of any argument that points at readable guest memory |
 | M1 Presence | Done in code | Headset READY with panel size, FOV, eye offsets; setup dialog finishes with OK; virtual camera attached and streaming blank frames; tracker GPU submit cycle completes. VR options in the settings dialog |
 | M2 Tracking | Done in code | `sceVrTrackerGetResult` fills HMD, eye and head poses plus velocities from the pose source at the requested prediction time; pad/Move/gun get a fixed pose below the head. Recenter via key, `Recalibrate` and `ResetOrientationRelative` |
-| M3 Submit | Works in a headset, needs quality work (see "Headset test") | Instance and device created through `XR_KHR_vulkan_enable2`, session on the emulator's queue, per-eye sRGB swapchains, projection layer with the pose and FOV given to the game |
+| M3 Submit | Works in a headset; comfort and input done, race frame rate is the open item | Instance and device created through `XR_KHR_vulkan_enable2`, session on the emulator's queue, per-eye sRGB swapchains, projection layer with the pose and FOV given to the game |
 | M4 Polish | Partly | Desktop mirror of one eye and the render scale option are in. Overlay quad layers, social screen, audio device selection and a VR config page beyond the Experimental tab are not |
 | M5 Breadth | Not started | Needs M0 traces from real titles first |
 
@@ -73,7 +73,7 @@ on its own and in a Quest 3; see "First run" and "Headset test" below.
 | OpenXR runtime smoke test against Monado 21 (simulated HMD, null compositor, lavapipe) | Instance and device through `XR_KHR_vulkan_enable2`, session to FOCUSED, 120 frames with a pose each, sRGB eye swapchains, native FOV and 63 mm IPD read back, recenter moves the head to the origin |
 | Windows build, clang-cl 20 (VS 2026), preset `x64-Clang-RelWithDebInfo` | Builds; no warnings in the new or changed files; `shadps4.exe` starts |
 | WipEout Omega Collection (CUSA05670 v1.07), no headset connected, desk pose source | Reaches VR mode and runs its VR frame loop at about 30 frames per second; both eye textures captured showing the stereo logo screen (screenshots kept outside the repo: they are game content); with a controller it goes past the title screen |
-| Meta Quest 3 over Link, Meta OpenXR runtime 1.207 | Game video and head tracking in the headset; PC gamepad controls the game. Uncomfortable, low resolution, no sound: see "Headset test" |
+| Meta Quest 3 over Link, Meta OpenXR runtime 1.207 | Two sessions. Comfort, Touch controllers and sound all work; menus run at 60 fps and look sharp. Races drop to 20-35 fps and the game halves its own resolution: see "Headset test (2026-09-22)" |
 | SteamVR with a headset | Not done: SteamVR reported no headset (`XR_ERROR_FORM_FACTOR_UNAVAILABLE`) |
 
 The smoke test drives `openxr_runtime.cpp` unchanged, with two shim headers for logging and the
@@ -255,32 +255,80 @@ as any 1.4x panel.
 
 ### Not fixed yet
 
-- **Sound in the headset.** Checks for the next session, in order: the Windows volume mixer
-  while the game runs (is shadps4 on the Oculus Virtual Audio Device, and is it producing
-  level?); the Oculus app's "Audio output in VR" and "Hear VR audio from computer" settings;
-  then whether SDL's default-device stream followed a default change made by Link. The
-  `Audio3d ... queue.size() >= max_entries` errors also appear in runs with sound and are not
-  the cause.
-- **Quest Touch controllers: implemented, untested.** An action set with bindings for the Touch,
-  Index, Vive, Windows Mixed Reality and simple controller profiles is attached with the session
-  (`OpenXrRuntime::CreateActions`), synced from the tracker's result path and each headset frame,
-  and pushed to the first pad as changes (`VR::PollInput`). Built and run in desk mode only, where
-  no session exists; the log line `OpenXR: controllers active` is the first thing to look for.
-- **Frame rate under 60.** If the log still shows well under 60 frames/s with the 120 Hz vblank,
-  the next candidates are the eye-texture readback path (`Readback Linear Images`) and the game's
-  own GPU cost at the chosen `render_scale`.
+- **Races run at 20 to 35 fps in the emulator, and that causes both remaining problems.** The
+  menus hold 60.0 frames/s; a race drops to 20-35 and the game's dynamic resolution halves the
+  eye (the screenshot hotkey saves the eye as the game rendered it: 1882x2117 in menus,
+  944x1056 in a race, which is the blockiness). The GPU is not the limit: 17% busy on an
+  RX 7800 XT, low CPU, so the emulator is stalling.
 
-### Next headset session
+  **The stall is the image readback.** With `Readback Linear Images` off, the same race holds
+  60.0 frames/s - and the game renders a black screen, which is why that setting is on. With it
+  on, each `ProcessDownloadImages` waits for the GPU, and the wait drains everything recorded
+  before it, so the command processor and the GPU never overlap. Measured per batch: four tiny
+  images (8x8, 6x3, 2x2; 4 KiB in all) and 0.4 to 2.5 ms of waiting, several times a frame.
+  The data volume is nothing; the pipeline drain is everything. Batching a batch's copies into
+  one wait is committed, and is not enough on its own.
 
-1. Per-game config: keep `psvr_enabled` and add `"render_scale": 1.4`; leave `hmd_refresh_hz`
-   at its default.
-2. Watch the log for `Vblank now 120 Hz (VR mode)`, `VR: game submits ... frames/s` (expect
-   about 60), and the first `render views: pose from the game (matched a sample), fov from the
-   game` trace line.
-3. Comfort check: look around in the menus and during a race. The world should stay put.
-4. Touch controllers: `OpenXR: controllers active, mapped onto the DualShock 4` in the log, then
-   the right stick and A through the menus (and `OpenXR: no bindings for ...` lines say which
-   profiles the runtime declined, which is normal for the ones it does not implement).
+  Next things to try, cheapest first:
+  1. Those images qualify only through the `width <= 8` clause in `FindTexture` and
+     `FindRenderTarget`, not through the linear-image rule that fixes the black screen. Drop
+     the tiny-image clause and check the game still draws: if it does, the stalls go with it.
+  2. Write the downloaded bytes from `Scheduler::DeferPriorityOperation` instead of waiting
+     (the `sync = false` path already there). Correct only if the EOP fence the guest waits on
+     is also deferred until the GPU reaches that point; today it is written when the packet is
+     parsed.
+  3. Do the copy on its own queue so it waits for the image's last write rather than for the
+     whole recorded frame.
+
+- **Where the dynamic resolution decision comes from.** WipEout reads the **core clock**
+  timestamps (`DataSelect::PerfCounter`, already scaled to 800 MHz - not the global clock,
+  whose value shadPS4 writes in nanoseconds). Four timestamps cycle per frame, two per eye, and
+  in a race at 30 fps the game measured about 4.9 ms and 5.6 ms per eye inside a 32.8 ms frame.
+  shadPS4 writes those timestamps when the command processor *parses* the packet, so what the
+  game measures is the emulator's translation cost, not the host GPU's. Once the frame rate is
+  fixed this may resolve itself; if not, this is where to look.
+
+## Headset test (2026-09-22, Quest 3 over Link)
+
+Second session, with the review fixes in. Comfort, controllers and sound are done; resolution
+and hitches are not.
+
+| Check | Result |
+|---|---|
+| `Vblank now 120 Hz (VR mode)` | Yes |
+| `VR: game submits ... frames/s` | 60.0 in menus (was 30), 45.0 in a race |
+| `render views: pose from the game (matched a sample), fov from the game` | Every frame |
+| Comfort | "very stable image" in menus and in a race; the pose mismatch is fixed |
+| Touch controllers | `OpenXR: controllers active, mapped onto the DualShock 4`, no `no bindings for` lines, and the sticks and buttons drive the menus |
+| Eye size at `render_scale` 1.4 | 1882x2117, against the runtime's 1872x2016 request |
+| Sound | Fixed, see below |
+| Image quality | Menus sharp, races blocky, worse with distance |
+| Hitches | Present; playable if they were gone. Traced to the readback stall above |
+
+What the fixes were:
+
+- **Sound.** The game played to the Windows default output device, which was a DualSense's
+  speaker, so the headset was silent while the mixer showed shadps4 producing level elsewhere.
+  The Meta runtime names the headset's endpoint through `XR_OCULUS_audio_device_guid`; in PSVR
+  mode every audio port but the pad speaker now opens that device while the output device
+  setting is left at "Default Device" (main, Bgm and the Audio3d sink all did open it). A
+  device chosen in the settings still wins.
+- **The desktop mirror paced the headset.** AMD's Windows driver does not offer Mailbox, so the
+  mirror fell back to Fifo, and the present thread that also drives the 120 Hz VR vblank waited
+  for the monitor: 7 ms on the usual 144 Hz screen, 16.7 ms after the window moved to a 60 Hz
+  4K monitor. In PSVR mode the fallback is Immediate; tearing in a mirror nobody is looking at
+  costs nothing.
+- **90 Hz against 60 fps.** 60 fps on a 90 Hz Link display judders, and `xrWaitFrame` pacing
+  pinned races to exactly 45.0 fps (45 = 90/2: two 120 Hz vblanks, 16.7 ms, then the next 90 Hz
+  slot at 22.2 ms). The session now asks for the highest offered rate that is a multiple of
+  60 Hz. Over Link the runtime offers only the rate set in the Meta app, and with the headset
+  set to 120 Hz the log reads `display refresh 120 Hz, available 120`.
+
+Operational notes from this session: the headset's own `adb logcat` VrApi lines report the Link
+rate and dropped frames (`FPS=69/90 ... Stale=20`), and `adb shell screencap` shows what the
+headset is actually displaying, which is how the blockiness was measured without wearing it.
+A Windows session that is locked or disconnected refuses screen capture and key injection, so
+driving the game from a tool call needs the session unlocked.
 
 ## Coordinate mapping
 
