@@ -329,7 +329,16 @@ prompt the eye screenshot is 1882x2117 and crisp; a few seconds into the race th
 is 944x1056, with the game submitting 22 to 35 frames/s. The game halves its own scene the
 moment the emulator stops keeping up.
 
-Two experiments that failed, so they are not worth repeating:
+Three experiments that failed, so they are not worth repeating:
+
+- **Neo (PS4 Pro) mode**, which the game would render at a higher resolution for: shadPS4 aborts
+  during the boot sequence in `TextureCache::ResolveOverlap`, "Unreachable code! Encountered
+  unresolvable image overlap with equal memory address" - the game puts a larger image at the
+  address of a smaller one whose resource count it does not exceed, which is the case that falls
+  through to the `UNREACHABLE`. Returning `ExpandImage` there instead gets the game running at
+  60 frames/s for a few seconds and then it crashes hard with nothing in the log. Neo mode is
+  worth having (it is the version of the game that renders more pixels), but it needs the
+  texture cache understood, not the assert patched.
 
 - **Dropping the `width <= 8` clause** that puts tiny images in the readback set: races run at
   60.0 frames/s and render black. Those 8x8 images are exactly what the black screen fix is
