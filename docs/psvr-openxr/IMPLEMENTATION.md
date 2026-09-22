@@ -74,7 +74,7 @@ on its own and in a Quest 3; see "First run" and "Headset test" below.
 | Windows build, clang-cl 20 (VS 2026), preset `x64-Clang-RelWithDebInfo` | Builds; no warnings in the new or changed files; `shadps4.exe` starts |
 | WipEout Omega Collection (CUSA05670 v1.07), no headset connected, desk pose source | Reaches VR mode and runs its VR frame loop at about 30 frames per second; both eye textures captured showing the stereo logo screen (screenshots kept outside the repo: they are game content); with a controller it goes past the title screen |
 | Meta Quest 3 over Link, Meta OpenXR runtime 1.207 | Two sessions. Comfort, Touch controllers and sound all work; menus run at 60 fps and look sharp. Races drop to 20-35 fps and the game halves its own resolution: see "Headset test (2026-09-22)" |
-| SteamVR with a headset | Not done: SteamVR reported no headset (`XR_ERROR_FORM_FACTOR_UNAVAILABLE`) |
+| SteamVR with a headset | Works (2026-09-22, Quest 3 over Air Link): `SteamVR/OpenXR 2.17.10`, system `SteamVR/OpenXR : oculus`, session to FOCUSED, eye swapchains 1996x2156, `display refresh 120 Hz`, controllers mapped. Only one runtime can hold the headset: while SteamVR runs, the Meta runtime returns `XR_ERROR_FORM_FACTOR_UNAVAILABLE` and the game silently falls back to desk tracking, so close SteamVR before running on the Meta runtime. SteamVR over Air Link also stacks two compositors and is choppy; it is not a useful frame-rate measurement |
 
 The smoke test drives `openxr_runtime.cpp` unchanged, with two shim headers for logging and the
 guest clock. Before the session is running the runtime cannot report views, so the FOV query
@@ -323,6 +323,20 @@ What the fixes were:
   slot at 22.2 ms). The session now asks for the highest offered rate that is a multiple of
   60 Hz. Over Link the runtime offers only the rate set in the Meta app, and with the headset
   set to 120 Hz the log reads `display refresh 120 Hz, available 120`.
+
+Measured at the race start, the clearest form of the resolution problem: at the "START RACE"
+prompt the eye screenshot is 1882x2117 and crisp; a few seconds into the race the same cockpit
+is 944x1056, with the game submitting 22 to 35 frames/s. The game halves its own scene the
+moment the emulator stops keeping up.
+
+Two experiments that failed, so they are not worth repeating:
+
+- **Dropping the `width <= 8` clause** that puts tiny images in the readback set: races run at
+  60.0 frames/s and render black. Those 8x8 images are exactly what the black screen fix is
+  about, so they have to be read back.
+- **Writing the readback bytes from `DeferPriorityOperation` instead of waiting**: the emulator
+  crashed on its own within a minute of a race. The staging buffer's tick watches make the
+  buffer safe, so the fault is elsewhere in doing this off the command processor thread.
 
 Operational notes from this session: the headset's own `adb logcat` VrApi lines report the Link
 rate and dropped frames (`FPS=69/90 ... Stale=20`), and `adb shell screencap` shows what the
