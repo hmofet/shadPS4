@@ -344,11 +344,15 @@ static u64 GetGpuClock64() {
     return static_cast<u64>(ticks);
 }
 
+/// Scales host TSC time by the gpu_time_scale setting around the first sample, so the elapsed
+/// GPU time a guest measures shrinks or grows while the counter stays monotonic.
+u64 ScaleGpuTime(u64 tsc);
+
 static u64 GetGpuPerfCounter() {
     const auto cpu_freq = Libraries::Kernel::sceKernelGetTscFrequency();
     const auto gpu_freq = Libraries::GnmDriver::sceGnmGetGpuCoreClockFrequency();
 
-    const auto cpu_cycles = Libraries::Kernel::sceKernelReadTsc();
+    const auto cpu_cycles = ScaleGpuTime(Libraries::Kernel::sceKernelReadTsc());
     const auto gpu_cycles = Common::MultiplyAndDivide64(cpu_cycles, gpu_freq, cpu_freq);
 
     return gpu_cycles;

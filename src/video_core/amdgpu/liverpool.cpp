@@ -51,6 +51,25 @@ static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
 std::array<u8, 48_KB> Liverpool::ConstantEngine::constants_heap;
 
+u64 ScaleGpuTime(u64 tsc) {
+    // Both are fixed at first use: a scale that changed mid-run would move the counter backwards.
+    static const u64 base = tsc;
+    static const double scale = [] {
+        const double value = std::clamp(EmulatorSettings.GetGpuTimeScale(), 0.01f, 100.0f);
+        if (value != 1.0) {
+            LOG_INFO(Render, "GPU time scale {}: EOP timestamps report scaled elapsed time",
+                     value);
+        }
+        return value;
+    }();
+    if (scale == 1.0) {
+        return tsc;
+    }
+    // Signed: another queue may have fixed the base after this timestamp was sampled.
+    const s64 elapsed = static_cast<s64>(tsc - base);
+    return base + static_cast<u64>(static_cast<s64>(static_cast<double>(elapsed) * scale));
+}
+
 static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset) {
     if (offset > span.size()) {
         LOG_ERROR(
