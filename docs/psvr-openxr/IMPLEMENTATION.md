@@ -59,9 +59,8 @@ to `desk`.
 | M4 Polish | Partly | Desktop mirror of one eye and the render scale option are in. Overlay quad layers, social screen, audio device selection and a VR config page beyond the Experimental tab are not |
 | M5 Breadth | Not started | Needs M0 traces from real titles first |
 
-"Done in code" means built and reviewed; none of it has been run against a game or a real headset
-yet. The first real run is the M0 exit criterion: a WipEout Omega Collection trace with PSVR
-enabled.
+"Done in code" means built and reviewed. M0 to M3 have since run with WipEout Omega Collection,
+on its own and in a Quest 3; see "First run" and "Headset test" below.
 
 ## Verification so far
 
