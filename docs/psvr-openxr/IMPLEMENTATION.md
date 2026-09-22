@@ -255,38 +255,84 @@ as any 1.4x panel.
 
 ### Not fixed yet
 
-- **Races run at 20 to 35 fps in the emulator, and that causes both remaining problems.** The
-  menus hold 60.0 frames/s; a race drops to 20-35 and the game's dynamic resolution halves the
-  eye (the screenshot hotkey saves the eye as the game rendered it: 1882x2117 in menus,
-  944x1056 in a race, which is the blockiness). The GPU is not the limit: 17% busy on an
-  RX 7800 XT, low CPU, so the emulator is stalling.
+Two problems remain, and they are separate. The resolution one has a cheap workaround that has
+not been tried; the frame rate one needs real work.
 
-  **The stall is the image readback.** With `Readback Linear Images` off, the same race holds
-  60.0 frames/s - and the game renders a black screen, which is why that setting is on. With it
-  on, each `ProcessDownloadImages` waits for the GPU, and the wait drains everything recorded
-  before it, so the command processor and the GPU never overlap. Measured per batch: four tiny
-  images (8x8, 6x3, 2x2; 4 KiB in all) and 0.4 to 2.5 ms of waiting, several times a frame.
-  The data volume is nothing; the pipeline drain is everything. Batching a batch's copies into
-  one wait is committed, and is not enough on its own.
+#### 1. The game halves its own resolution in a race
 
-  Next things to try, cheapest first:
-  1. Those images qualify only through the `width <= 8` clause in `FindTexture` and
-     `FindRenderTarget`, not through the linear-image rule that fixes the black screen. Drop
-     the tiny-image clause and check the game still draws: if it does, the stalls go with it.
-  2. Write the downloaded bytes from `Scheduler::DeferPriorityOperation` instead of waiting
-     (the `sync = false` path already there). Correct only if the EOP fence the guest waits on
-     is also deferred until the GPU reaches that point; today it is written when the packet is
-     parsed.
-  3. Do the copy on its own queue so it waits for the image's last write rather than for the
-     whole recorded frame.
+The screenshot hotkey saves the eye exactly as the game rendered it, and the `eyes:` trace line
+reports the size the game itself put in the eye T#, so both agree: the game, not the emulator,
+chooses this.
 
-- **Where the dynamic resolution decision comes from.** WipEout reads the **core clock**
-  timestamps (`DataSelect::PerfCounter`, already scaled to 800 MHz - not the global clock,
-  whose value shadPS4 writes in nanoseconds). Four timestamps cycle per frame, two per eye, and
-  in a race at 30 fps the game measured about 4.9 ms and 5.6 ms per eye inside a 32.8 ms frame.
-  shadPS4 writes those timestamps when the command processor *parses* the packet, so what the
-  game measures is the emulator's translation cost, not the host GPU's. Once the frame rate is
-  fixed this may resolve itself; if not, this is where to look.
+The game runs its eye target at either the full size it derives from the panel we report, or at
+exactly half. Menus get full; a race gets half. Measured at one race start: 1882x2117 and crisp
+at the "START RACE" prompt, 944x1056 a few seconds later.
+
+`render_scale` multiplies the panel we report (`VR::GetPanelResolution` = 1920x1080 times the
+scale), and the game sizes its eye at 1.4x half of that. Because the race always lands on the
+half step, the in-race resolution scales with the setting:
+
+| `render_scale` | Eye at full (menus) | Eye in a race (half) |
+|---|---|---|
+| 1.0 | 1344x1512 | 672x760 |
+| 1.4 | 1882x2117 | 944x1056 |
+| 2.0 | 2688x3024 (seen at 60 fps in menus) | not measured, expect about 1344x1512 |
+| 2.8 | 3763x4234 | not measured, expect about 1882x2117 |
+
+**The obvious next experiment: `render_scale` 2.8, so the race's half step lands on the Quest 3's
+own 1872x2016.** The GPU has room for it (17 to 20% busy on an RX 7800 XT), and nothing here is
+GPU bound. What is unknown is whether the extra pixels push the game's own measurement further
+over budget, or whether the half step is really a floor rather than one step of several. 1.0 was
+tried and is worse (672x760), which is what established that the race always halves.
+
+Why it halves: the game measures GPU time from the **core clock** timestamps
+(`DataSelect::PerfCounter`, already scaled to 800 MHz; it does not read the global clock, whose
+value shadPS4 writes in nanoseconds). Four timestamps cycle per frame, two per eye. In a race at
+30 fps it measured about 4.9 ms and 5.6 ms per eye inside a 32.8 ms frame. shadPS4 writes those
+timestamps when the command processor *parses* the packet, so what the game measures is the
+emulator's translation cost, not the host GPU's. Note the decision does not follow the frame
+rate: at the "START RACE" prompt the game held full resolution at 22 to 29 fps, and in a race it
+stayed halved at 50 fps. If raising `render_scale` is not enough, this is the mechanism to
+attack - either make the timestamps reflect the host GPU, or reduce the parse cost.
+
+#### 2. Races run at 20 to 35 fps in the emulator
+
+The GPU is not the limit: 17% busy, low CPU. The emulator is stalling, and the stall is the
+image readback. With `Readback Linear Images` off, the same race holds 60.0 frames/s - and
+renders a black screen, which is why that setting is on.
+
+Each `ProcessDownloadImages` waits for the GPU, and `Scheduler::Finish` drains everything
+recorded before it, so the command processor and the GPU never overlap. Measured in a race:
+**about 270 waits per second costing about 250 ms** - a quarter of wall time, plus the lost
+overlap. What is copied is nothing: four images of 8x8, 6x3 and 2x2, 4 KiB in all. The cost is
+the pipeline drain, not the data. Batching one batch's copies into a single wait is committed
+(b4cbf2bf) and is not enough on its own.
+
+The remaining idea worth the work: **do the copy on its own queue, so it waits for the image's
+last write rather than for the whole recorded frame.** The two cheaper alternatives are both
+already ruled out below.
+
+#### Experiments already tried, with results
+
+- **Drop the `width <= 8` clause** in `FindTexture` and `FindRenderTarget`, which is the only
+  reason those tiny images are read back at all (the linear-image rule does not cover them):
+  races hold 60.0 frames/s and **render black**. Those 8x8 images are exactly what the black
+  screen fix is about, so they must be read back. Do not retry.
+- **Write the readback bytes from `Scheduler::DeferPriorityOperation` instead of waiting**: the
+  emulator **crashed on its own** within a minute of a race, with nothing in the log. The
+  staging buffer's tick watches make the buffer itself safe, so the fault is elsewhere in doing
+  this off the command processor thread. Retry only with the ordering understood: the EOP fence
+  the guest waits on is written at parse time, so a deferred image write can land after the
+  guest has already seen the fence.
+- **Neo (PS4 Pro) mode**, which would render more pixels: shadPS4 aborts during boot in
+  `TextureCache::ResolveOverlap`, "Unreachable code! Encountered unresolvable image overlap with
+  equal memory address" - the game puts a larger image at the address of a smaller one whose
+  resource count it does not exceed, the case that falls through to the `UNREACHABLE`. Returning
+  `ExpandImage` there gets the game to 60 frames/s for a few seconds and then it crashes hard.
+  Worth having eventually; needs the texture cache understood, not the assert patched.
+- **The 100 MHz global clock**: shadPS4 writes `DataSelect::GpuClock64` in nanoseconds, which is
+  probably wrong (the GCN global counter runs at the reference clock), but **WipEout does not
+  read it**, so changing it does nothing here. Left alone.
 
 ## Headset test (2026-09-22, Quest 3 over Link)
 
@@ -296,13 +342,13 @@ and hitches are not.
 | Check | Result |
 |---|---|
 | `Vblank now 120 Hz (VR mode)` | Yes |
-| `VR: game submits ... frames/s` | 60.0 in menus (was 30), 45.0 in a race |
+| `VR: game submits ... frames/s` | 60.0 in menus (was 30); a race is 45.0 at a 90 Hz display, 20 to 35 at 120 Hz |
 | `render views: pose from the game (matched a sample), fov from the game` | Every frame |
 | Comfort | "very stable image" in menus and in a race; the pose mismatch is fixed |
 | Touch controllers | `OpenXR: controllers active, mapped onto the DualShock 4`, no `no bindings for` lines, and the sticks and buttons drive the menus |
 | Eye size at `render_scale` 1.4 | 1882x2117, against the runtime's 1872x2016 request |
 | Sound | Fixed, see below |
-| Image quality | Menus sharp, races blocky, worse with distance |
+| Image quality | Menus sharp, races blocky and worse with distance: the game halves its own eye target in a race |
 | Hitches | Present; playable if they were gone. Traced to the readback stall above |
 
 What the fixes were:
@@ -324,34 +370,38 @@ What the fixes were:
   60 Hz. Over Link the runtime offers only the rate set in the Meta app, and with the headset
   set to 120 Hz the log reads `display refresh 120 Hz, available 120`.
 
-Measured at the race start, the clearest form of the resolution problem: at the "START RACE"
-prompt the eye screenshot is 1882x2117 and crisp; a few seconds into the race the same cockpit
-is 944x1056, with the game submitting 22 to 35 frames/s. The game halves its own scene the
-moment the emulator stops keeping up.
+The experiments and measurements from this session are in "Not fixed yet" above, which is the
+place to start; the failed ones are listed there so they are not repeated.
 
-Three experiments that failed, so they are not worth repeating:
+Runtimes, both verified this session:
 
-- **Neo (PS4 Pro) mode**, which the game would render at a higher resolution for: shadPS4 aborts
-  during the boot sequence in `TextureCache::ResolveOverlap`, "Unreachable code! Encountered
-  unresolvable image overlap with equal memory address" - the game puts a larger image at the
-  address of a smaller one whose resource count it does not exceed, which is the case that falls
-  through to the `UNREACHABLE`. Returning `ExpandImage` there instead gets the game running at
-  60 frames/s for a few seconds and then it crashes hard with nothing in the log. Neo mode is
-  worth having (it is the version of the game that renders more pixels), but it needs the
-  texture cache understood, not the assert patched.
+- **Meta runtime over Link** (`XR_RUNTIME_JSON` pointed at `oculus_openxr_64.json`): eye
+  swapchains 1872x2016, 120 Hz once the headset is set to 120 Hz in the Meta PC app. The setting
+  has moved in recent versions of that app; the Oculus Debug Tool CLI does not expose it.
+- **SteamVR** (the system's active runtime, so no `XR_RUNTIME_JSON`), Quest 3 over Air Link:
+  `SteamVR/OpenXR 2.17.10`, system `SteamVR/OpenXR : oculus`, session to FOCUSED, eye swapchains
+  1996x2156, `display refresh 120 Hz`, controllers mapped.
 
-- **Dropping the `width <= 8` clause** that puts tiny images in the readback set: races run at
-  60.0 frames/s and render black. Those 8x8 images are exactly what the black screen fix is
-  about, so they have to be read back.
-- **Writing the readback bytes from `DeferPriorityOperation` instead of waiting**: the emulator
-  crashed on its own within a minute of a race. The staging buffer's tick watches make the
-  buffer safe, so the fault is elsewhere in doing this off the command processor thread.
+Only one runtime can hold the headset at a time. While SteamVR runs, the Meta runtime returns
+`XR_ERROR_FORM_FACTOR_UNAVAILABLE` and the game silently falls back to desk tracking, so close
+SteamVR (stop `vrmonitor`) before running on the Meta runtime. SteamVR over Air Link also stacks
+two compositors and is choppy; it is not a useful frame-rate measurement.
 
-Operational notes from this session: the headset's own `adb logcat` VrApi lines report the Link
-rate and dropped frames (`FPS=69/90 ... Stale=20`), and `adb shell screencap` shows what the
-headset is actually displaying, which is how the blockiness was measured without wearing it.
-A Windows session that is locked or disconnected refuses screen capture and key injection, so
-driving the game from a tool call needs the session unlocked.
+Operational notes, all of which cost time this session:
+
+- The screenshot hotkey (F12) saves the eye exactly as the game rendered it, which is the
+  measurement for anything about resolution; the desktop mirror is scaled and tells you nothing.
+- `adb shell screencap` on the headset shows what the headset is actually displaying, and its
+  own `adb logcat` VrApi lines give the Link rate and dropped frames
+  (`FPS=69/90 ... Stale=20`).
+- A Windows session that is locked or disconnected refuses screen capture and key injection, so
+  driving the emulator from a tool call needs the session unlocked. Bringing the window to the
+  front needs an Alt tap before `SetForegroundWindow`, or the key never arrives.
+- Starting the emulator twice leaves two OpenXR sessions fighting over the headset; the tell is
+  two `OpenXR: runtime ...` lines in one log and a frame rate around 10. Check the process count
+  after a restart.
+- A relaunch while SteamVR still holds the scene-app slot from a crashed instance shows
+  "waiting for shadPS4" in the headset with a healthy FOCUSED session in the log.
 
 ## Coordinate mapping
 
