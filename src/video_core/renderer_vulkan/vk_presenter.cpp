@@ -10,6 +10,7 @@
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/system/systemservice.h"
+#include "core/vr/vr_service.h"
 #include "imgui/friends_layer.h"
 #include "imgui/invitation_prompt_layer.h"
 #include "imgui/notifications_layer.h"
@@ -19,6 +20,7 @@
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -266,7 +268,8 @@ static const std::array<u8, 1024>& GetUnorm10ToU8Lut() {
 }
 
 static void CopyImageToReadback(const vk::CommandBuffer& cmdbuf, const vk::Image image,
-                                const vk::ImageLayout layout, ScreenshotReadback& readback) {
+                                const vk::ImageLayout layout, ScreenshotReadback& readback,
+                                const u32 layer = 0) {
     const vk::BufferImageCopy copy_region = {
         .bufferOffset = 0,
         .bufferRowLength = 0,
@@ -275,7 +278,7 @@ static void CopyImageToReadback(const vk::CommandBuffer& cmdbuf, const vk::Image
             {
                 .aspectMask = vk::ImageAspectFlagBits::eColor,
                 .mipLevel = 0,
-                .baseArrayLayer = 0,
+                .baseArrayLayer = layer,
                 .layerCount = 1,
             },
         .imageOffset = {0, 0, 0},
@@ -497,6 +500,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
+    vr_pass.Create(device, instance.GetAllocator());
 
     ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
     ImGui::Friends::Register();
@@ -513,6 +517,8 @@ Presenter::~Presenter() {
     draw_scheduler.Finish();
     present_scheduler.Finish();
     flip_scheduler.Finish();
+    // The OpenXR session holds the device, so it goes before anything else is torn down.
+    VR::OnVulkanDeviceDestroying();
     Check(draw_scheduler.CommandBuffer().reset());
     Check(present_scheduler.CommandBuffer().reset());
     Check(flip_scheduler.CommandBuffer().reset());
@@ -675,6 +681,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     const auto image_id = texture_cache.FindImage(desc);
     texture_cache.UpdateImage(image_id);
 
+    // In VR mode, wait for the headset's next frame and get its eye images. No-op otherwise.
+    const VR::FrameSubmit vr_frame = VR::BeginFrame();
+
     Frame* frame = GetRenderFrame();
 
     const auto frame_subresources = vk::ImageSubresourceRange{
@@ -732,18 +741,60 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                             readback);
     }
 
+    // In VR mode, cut the eye images out of the frame for the headset, unless the game is
+    // handing its eye textures to reprojection (PrepareHmdFrame), which takes precedence.
+    HostPasses::VrPass::Output vr_output{};
+    bool vr_rendered = false;
+    if (vr_frame.vr_active && !ReceivingHmdFrames()) {
+        const vk::Format format = image.info.pixel_format;
+        if (instance.IsFormatSupported(format, vk::FormatFeatureFlagBits2::eBlitSrc)) {
+            image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+                          {}, cmdbuf);
+            const bool linear = instance.IsFormatSupported(
+                format, vk::FormatFeatureFlagBits2::eSampledImageFilterLinear);
+            const s32 width = static_cast<s32>(image_size.width);
+            const bool sbs = vr_frame.eye_source == VR::EyeSource::SideBySide;
+            std::array<HostPasses::VrPass::EyeSource, VR::EyeCount> sources{};
+            for (u32 eye = 0; eye < VR::EyeCount; eye++) {
+                sources[eye] = {
+                    .image = image.GetImage(),
+                    .format = format,
+                    .extent = image_size,
+                    .layer = 0,
+                    .x0 = sbs && eye == VR::EyeRight ? width / 2 : 0,
+                    .x1 = sbs && eye == VR::EyeLeft ? width / 2 : width,
+                    .linear_filter = linear,
+                };
+            }
+            vr_output = vr_pass.Render(cmdbuf, sources, view_info.format, vr_frame);
+            vr_rendered = vr_frame.xr_render;
+        } else {
+            LOG_ERROR(Render_Vulkan, "VR: frame format {} cannot be blitted",
+                      vk::to_string(image.info.pixel_format));
+        }
+    }
+
     // Continue with host-side passes that draw the displayed (scaled) frame.
     image.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead, {},
                   cmdbuf);
 
-    image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
+    // The desktop window can show a single eye instead of the whole frame while in VR mode.
+    vk::Extent2D display_size = image_size;
+    if (vr_output.mirror_view) {
+        image_view = vr_output.mirror_view;
+        display_size = vr_output.mirror_extent;
+        expected_ratio =
+            static_cast<float>(display_size.width) / static_cast<float>(display_size.height);
+    }
+
+    image_view = fsr_pass.Render(cmdbuf, image_view, display_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr);
 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
-    pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
+    pp_pass.Render(cmdbuf, image_view, display_size, *frame, pp_settings);
 
     DebugState.game_resolution = {image_size.width, image_size.height};
     DebugState.output_resolution = {frame->width, frame->height};
@@ -761,6 +812,154 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     frame->ready_tick = draw_scheduler.CurrentTick();
     SubmitInfo info{};
     draw_scheduler.Flush(info);
+
+    if (vr_frame.xr_frame) {
+        // The eye image copies are now on the queue. The runtime may submit to the same queue
+        // while ending the frame, so it takes the submit lock like any other submitter.
+        std::scoped_lock submit_lock{Scheduler::submit_mutex};
+        VR::EndFrame(vr_frame, vr_rendered);
+    }
+    return frame;
+}
+
+bool Presenter::ReceivingHmdFrames() const {
+    const s64 last = last_hmd_frame_ns.load(std::memory_order_relaxed);
+    const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return last != 0 &&
+           now - last < std::chrono::nanoseconds(std::chrono::milliseconds(250)).count();
+}
+
+Frame* Presenter::PrepareHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image& right) {
+    last_hmd_frame_ns.store(std::chrono::steady_clock::now().time_since_epoch().count(),
+                            std::memory_order_relaxed);
+
+    // The eye textures as the game described them to libSceHmdReprojection. They are usually
+    // two layers of one array texture, but may be separate textures.
+    const std::array<const AmdGpu::Image*, VR::EyeCount> sharps{&left, &right};
+    Shader::ImageResource resource{};
+    resource.is_array = true;
+    std::array<VideoCore::ImageId, VR::EyeCount> image_ids{};
+    for (u32 eye = 0; eye < VR::EyeCount; eye++) {
+        VideoCore::TextureCache::ImageDesc desc{*sharps[eye], resource};
+        image_ids[eye] = texture_cache.FindImage(desc);
+        texture_cache.UpdateImage(image_ids[eye]);
+    }
+
+    const VR::FrameSubmit vr_frame = VR::BeginFrame();
+    Frame* frame = GetRenderFrame();
+
+    const auto pre_barrier = vk::ImageMemoryBarrier2{
+        .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentRead,
+        .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+        .image = frame->image,
+        .subresourceRange{vk::ImageSubresourceRange{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = VK_REMAINING_ARRAY_LAYERS,
+        }},
+    };
+    draw_scheduler.EndRendering();
+    const auto cmdbuf = draw_scheduler.CommandBuffer();
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &pre_barrier,
+    });
+
+    // Headset: each eye's layer into its swapchain image.
+    std::array<HostPasses::VrPass::EyeSource, VR::EyeCount> sources{};
+    bool blittable = true;
+    for (u32 eye = 0; eye < VR::EyeCount; eye++) {
+        auto& image = texture_cache.GetImage(image_ids[eye]);
+        const vk::Format format = image.info.pixel_format;
+        blittable &= instance.IsFormatSupported(format, vk::FormatFeatureFlagBits2::eBlitSrc);
+        image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
+                      cmdbuf);
+        const u32 layers = std::max<u32>(image.info.resources.layers, 1);
+        sources[eye] = {
+            .image = image.GetImage(),
+            .format = format,
+            .extent = {image.info.size.width, image.info.size.height},
+            .layer = std::min<u32>(static_cast<u32>(sharps[eye]->base_array), layers - 1),
+            .x0 = 0,
+            .x1 = static_cast<s32>(image.info.size.width),
+            .linear_filter = instance.IsFormatSupported(
+                format, vk::FormatFeatureFlagBits2::eSampledImageFilterLinear),
+        };
+    }
+
+    const u32 mirror_eye = vr_frame.mirror == VR::MirrorMode::Right ? VR::EyeRight : VR::EyeLeft;
+
+    // Game-only screenshots capture the mirrored eye as the game rendered it.
+    std::vector<ScreenshotReadback> pending_screenshots;
+    {
+        const u32 requested = VideoCore::ConsumeGameOnlyScreenshotRequests();
+        std::vector<u32> eyes_to_capture;
+        if (requested > 0) {
+            eyes_to_capture.push_back(mirror_eye);
+        }
+        for (const u32 eye : eyes_to_capture) {
+            auto& image = texture_cache.GetImage(image_ids[eye]);
+            pending_screenshots.emplace_back(instance, draw_scheduler, ScreenshotKind::GameOnly,
+                                             BuildScreenshotPaths(ScreenshotKind::GameOnly, 1),
+                                             image.info.size.width, image.info.size.height,
+                                             sources[eye].format, false);
+            CopyImageToReadback(cmdbuf, image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                pending_screenshots.back(), sources[eye].layer);
+        }
+    }
+    VideoCore::ImageViewInfo view_info{};
+    view_info.format = LiverpoolToVK::SurfaceFormat(sharps[mirror_eye]->GetDataFmt(),
+                                                    sharps[mirror_eye]->GetNumberFmt());
+    view_info.type = AmdGpu::ImageType::Color2D;
+    view_info.range.base.layer = sources[mirror_eye].layer;
+    view_info.range.extent.layers = 1;
+    // Exclude alpha from output frame to avoid blending with UI.
+    view_info.mapping.a = vk::ComponentSwizzle::eOne;
+
+    bool vr_rendered = false;
+    if (vr_frame.vr_active && blittable) {
+        vr_pass.Render(cmdbuf, sources, view_info.format, vr_frame);
+        vr_rendered = vr_frame.xr_render;
+    } else if (!blittable) {
+        LOG_ERROR(Render_Vulkan, "VR: eye texture format cannot be blitted");
+    }
+
+    // Desktop window: one eye, since there is no flat frame in VR mode.
+    auto& mirror_image = texture_cache.GetImage(image_ids[mirror_eye]);
+    mirror_image.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
+                         {}, cmdbuf);
+    auto image_view = *mirror_image.FindView(view_info).image_view;
+    const vk::Extent2D eye_size{mirror_image.info.size.width, mirror_image.info.size.height};
+    expected_ratio = static_cast<float>(eye_size.width) / static_cast<float>(eye_size.height);
+    image_view = fsr_pass.Render(cmdbuf, image_view, eye_size, {frame->width, frame->height},
+                                 fsr_settings, frame->is_hdr);
+    pp_settings.srgb_input = false;
+    pp_pass.Render(cmdbuf, image_view, eye_size, *frame, pp_settings);
+
+    DebugState.game_resolution = {eye_size.width, eye_size.height};
+    DebugState.output_resolution = {frame->width, frame->height};
+
+    if (!pending_screenshots.empty()) {
+        auto deferred =
+            std::make_shared<std::vector<ScreenshotReadback>>(std::move(pending_screenshots));
+        draw_scheduler.DeferPriorityOperation([deferred]() { SavePendingScreenshots(*deferred); });
+    }
+
+    frame->ready_semaphore = draw_scheduler.GetMasterSemaphore()->Handle();
+    frame->ready_tick = draw_scheduler.CurrentTick();
+    SubmitInfo info{};
+    draw_scheduler.Flush(info);
+
+    if (vr_frame.xr_frame) {
+        std::scoped_lock submit_lock{Scheduler::submit_mutex};
+        VR::EndFrame(vr_frame, vr_rendered);
+    }
     return frame;
 }
 

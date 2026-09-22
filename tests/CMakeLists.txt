@@ -39,6 +39,8 @@ set(SETTINGS_TEST_SOURCES
     test_emulator_settings.cpp
     # Windows static guest red-zone protection
     test_windows_guest_red_zone_protection_settings.cpp
+    # VR pose math (header only)
+    test_vr_math.cpp
 )
 
 set(NGS2_TEST_SOURCES

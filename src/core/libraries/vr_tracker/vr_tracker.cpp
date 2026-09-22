@@ -8,11 +8,33 @@
 #include "core/libraries/vr_tracker/vr_tracker.h"
 #include "core/libraries/vr_tracker/vr_tracker_error.h"
 #include "core/memory.h"
+#include "core/vr/vr_service.h"
 #include "video_core/amdgpu/liverpool.h"
 
 namespace Libraries::VrTracker {
 
 static bool g_library_initialized = false;
+
+// Set by GpuSubmit, consumed by the GpuWait variants. There is no camera image to process, so a
+// submit completes immediately.
+static bool g_gpu_submitted = false;
+
+// Default prediction when a game asks for a predicted pose without a time: two 90 Hz frames.
+static constexpr u64 DefaultPredictionUs = 22'222;
+
+// Where the DualShock 4 is assumed to be when tracking a pad, relative to the head (heading only).
+static constexpr VR::Vec3 PadOffset{0.0f, -0.35f, -0.35f};
+
+static void FillPose(OrbisVrTrackerPoseData& out, const VR::Pose& pose) {
+    // Move from tracking space (origin at the head's start) to PSVR camera space.
+    out.position_x = pose.position.x;
+    out.position_y = pose.position.y;
+    out.position_z = pose.position.z + VR::CameraDistance;
+    out.orientation_x = pose.orientation.x;
+    out.orientation_y = pose.orientation.y;
+    out.orientation_z = pose.orientation.z;
+    out.orientation_w = pose.orientation.w;
+}
 
 // Internal memory
 static void* g_garlic_memory_pointer = nullptr;
@@ -135,7 +157,21 @@ s32 PS4_SYSV_ABI sceVrTrackerInit(const OrbisVrTrackerInitParam* param) {
     g_work_size = param->work_memory_size;
 
     // All initialization checks passed.
-    LOG_WARNING(Lib_VrTracker, "PSVR headsets are not supported yet");
+    if (VR::IsPsvrEnabled()) {
+        LOG_INFO(Lib_VrTracker, "Tracking from pose source '{}'", VR::GetPoseSourceName());
+    } else {
+        LOG_WARNING(Lib_VrTracker, "PSVR headsets are not supported yet");
+    }
+    VR_TRACE(Lib_VrTracker,
+             "sceVrTrackerInit profile={} exec_mode={} pipe={} queue={} calib(hmd={} pad={} "
+             "move={} gun={})",
+             static_cast<s32>(param->profile), static_cast<s32>(param->execution_mode),
+             param->gpu_pipe_id, param->gpu_queue_id,
+             static_cast<s32>(param->calibration_settings.hmd_position),
+             static_cast<s32>(param->calibration_settings.pad_position),
+             static_cast<s32>(param->calibration_settings.move_position),
+             static_cast<s32>(param->calibration_settings.gun_position));
+    g_gpu_submitted = false;
     g_library_initialized = true;
 
     return ORBIS_OK;
@@ -155,8 +191,9 @@ s32 PS4_SYSV_ABI sceVrTrackerRegisterDevice2(const OrbisVrTrackerDeviceType devi
 
 s32 PS4_SYSV_ABI sceVrTrackerRegisterDeviceInternal(const OrbisVrTrackerDeviceType device_type,
                                                     const s32 handle, s32 unk0, s32 unk1) {
-    LOG_WARNING(Lib_VrTracker, "(STUBBED) called, device_type = {}, handle = {}",
-                static_cast<u32>(device_type), handle);
+    VR_TRACE(Lib_VrTracker,
+             "sceVrTrackerRegisterDevice device_type={} handle={:#x} unk0={} unk1={}",
+             static_cast<u32>(device_type), handle, unk0, unk1);
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -204,18 +241,128 @@ s32 PS4_SYSV_ABI sceVrTrackerRegisterDeviceInternal(const OrbisVrTrackerDeviceTy
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerCpuProcess(const OrbisVrTrackerCpuProcessParam* param) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker, "sceVrTrackerCpuProcess mode={} handle={:#x}",
+             param ? static_cast<s32>(param->operation_mode) : -1, param ? param->handle : -1);
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerGetPlayAreaWarningInfo(OrbisVrTrackerPlayAreaWarningInfo* info) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker, "sceVrTrackerGetPlayAreaWarningInfo info={}", fmt::ptr(info));
+    if (!VR::IsPsvrEnabled()) {
+        return ORBIS_OK;
+    }
+    if (!g_library_initialized) {
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
+    }
+    if (info == nullptr) {
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID;
+    }
+    // The player is always inside the play area; the host runtime draws its own boundary.
+    const u32 size = info->size;
+    memset(info, 0, sizeof(OrbisVrTrackerPlayAreaWarningInfo));
+    info->size = size;
+    info->is_out_of_play_area = false;
+    info->is_distance_data_valid = false;
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerGetResult(const OrbisVrTrackerGetResultParam* param,
                                        OrbisVrTrackerResultData* result) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker,
+             "sceVrTrackerGetResult handle={:#x} type={} prediction_time={} orientation={} "
+             "usage={} user_frame={} now={}",
+             param ? param->handle : -1, param ? static_cast<s32>(param->result_type) : -1,
+             param ? param->prediction_time : 0,
+             param ? static_cast<s32>(param->orientation_type) : -1,
+             param ? static_cast<s32>(param->usage_type) : -1, param ? param->user_frame_number : 0,
+             Libraries::Kernel::sceKernelGetProcessTime());
+    if (!VR::IsPsvrEnabled()) {
+        LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+        return ORBIS_OK;
+    }
+    if (!g_library_initialized) {
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
+    }
+    if (param == nullptr || result == nullptr) {
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID;
+    }
+
+    const s32 handle = param->handle;
+    const bool is_hmd = handle == g_hmd_handle && handle != -1;
+    const bool is_pad = handle == g_pad_handle && handle != -1;
+    const bool is_move = handle == g_move_handle && handle != -1;
+    const bool is_gun = handle == g_gun_handle && handle != -1;
+    if (!is_hmd && !is_pad && !is_move && !is_gun) {
+        return ORBIS_VR_TRACKER_ERROR_DEVICE_NOT_REGISTERED;
+    }
+
+    VR::PollRecenterKey();
+
+    const u64 now = Libraries::Kernel::sceKernelGetProcessTime();
+    u64 target_time = now;
+    if (param->result_type == OrbisVrTrackerResultType::ORBIS_VR_TRACKER_RESULT_PREDICTED) {
+        target_time =
+            param->prediction_time != 0 ? param->prediction_time : now + DefaultPredictionUs;
+    }
+
+    memset(result, 0, sizeof(OrbisVrTrackerResultData));
+    result->handle = handle;
+    result->connected = 1;
+    result->timestamp = now;
+    result->device_timestamp = now;
+    result->recalibrate_necessity =
+        OrbisVrTrackerRecalibrateNecessityType::ORBIS_VR_TRACKER_RECALIBRATE_NECESSITY_NOTHING;
+    result->playarea_brightness_risk =
+        OrbisVrTrackerPlayareaBrightnessRiskType::ORBIS_VR_TRACKER_PLAYAREA_BRIGHTNESS_RISK_LOW;
+    result->led_color = is_hmd ? OrbisVrTrackerLedColor::ORBIS_VR_TRACKER_LED_COLOR_BLUE
+                               : OrbisVrTrackerLedColor::ORBIS_VR_TRACKER_LED_COLOR_RED;
+    result->camera_orientation_w = 1.0f;
+    result->user_frame_number = param->user_frame_number;
+
+    VR::TrackingSample sample;
+    if (!VR::SampleHead(target_time, is_hmd, sample)) {
+        // Connected but not seen, which is what a PSVR out of the camera's view reports.
+        result->status = OrbisVrTrackerStatus::ORBIS_VR_TRACKER_STATUS_NOT_TRACKING;
+        result->position_quality = OrbisVrTrackerQuality::ORBIS_VR_TRACKER_QUALITY_NONE;
+        result->orientation_quality = OrbisVrTrackerQuality::ORBIS_VR_TRACKER_QUALITY_NONE;
+        return ORBIS_OK;
+    }
+
+    result->status = OrbisVrTrackerStatus::ORBIS_VR_TRACKER_STATUS_TRACKING;
+    result->position_quality = OrbisVrTrackerQuality::ORBIS_VR_TRACKER_QUALITY_FULL;
+    result->orientation_quality = OrbisVrTrackerQuality::ORBIS_VR_TRACKER_QUALITY_FULL;
+
+    if (is_hmd) {
+        result->velocity_x = sample.linear_velocity.x;
+        result->velocity_y = sample.linear_velocity.y;
+        result->velocity_z = sample.linear_velocity.z;
+        result->angular_velocity_x = sample.angular_velocity.x;
+        result->angular_velocity_y = sample.angular_velocity.y;
+        result->angular_velocity_z = sample.angular_velocity.z;
+
+        auto& hmd = result->hmd_info;
+        FillPose(hmd.device_pose, sample.head);
+        FillPose(hmd.head_pose, sample.head);
+        FillPose(hmd.left_eye_pose, sample.eyes[VR::EyeLeft]);
+        FillPose(hmd.right_eye_pose, sample.eyes[VR::EyeRight]);
+        hmd.rear_tracking_status =
+            OrbisVrTrackerHmdRearTrackingStatus::ORBIS_VR_TRACKER_REAR_TRACKING_READY;
+        hmd.sensor_read_system_timestamp = now;
+        VR_TRACE(Lib_VrTracker,
+                 "  hmd pos=({:.3f},{:.3f},{:.3f}) rot=({:.3f},{:.3f},{:.3f},{:.3f})",
+                 hmd.head_pose.position_x, hmd.head_pose.position_y, hmd.head_pose.position_z,
+                 hmd.head_pose.orientation_x, hmd.head_pose.orientation_y,
+                 hmd.head_pose.orientation_z, hmd.head_pose.orientation_w);
+    } else {
+        // No controller tracking yet: hold the device at a fixed spot below and in front of the
+        // head, facing the way the head faces.
+        const VR::Quat heading = VR::YawOnly(sample.head.orientation);
+        const VR::Pose device{heading, sample.head.position + VR::Rotate(heading, PadOffset)};
+        OrbisVrTrackerPoseData* pose = is_pad    ? &result->pad_info.device_pose
+                                       : is_move ? &result->move_info.device_pose
+                                                 : &result->gun_info.device_pose;
+        FillPose(*pose, device);
+    }
     return ORBIS_OK;
 }
 
@@ -232,9 +379,20 @@ s32 PS4_SYSV_ABI sceVrTrackerGetTime(u64* time) {
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerGpuSubmit(const OrbisVrTrackerGpuSubmitParam* param) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker, "sceVrTrackerGpuSubmit size={} permit={} robustness={} frame={}",
+             param ? param->size : 0,
+             param ? static_cast<s32>(param->tracking_device_permit_type) : -1,
+             param ? static_cast<s32>(param->robustness_level) : -1,
+             param ? param->camera_frame_data.meta.frame[0] : 0);
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
+    }
+    if (VR::IsPsvrEnabled()) {
+        if (param == nullptr) {
+            return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID;
+        }
+        g_gpu_submitted = true;
+        return ORBIS_OK;
     }
 
     // Impossible to submit valid data here since sceCameraGetFrameData returns an error.
@@ -242,12 +400,16 @@ s32 PS4_SYSV_ABI sceVrTrackerGpuSubmit(const OrbisVrTrackerGpuSubmitParam* param
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerGpuWait(const OrbisVrTrackerGpuWaitParam* param) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker, "sceVrTrackerGpuWait submitted={}", g_gpu_submitted);
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
     if (param == nullptr || param->size != sizeof(OrbisVrTrackerGpuWaitParam)) {
         return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID;
+    }
+    if (VR::IsPsvrEnabled() && g_gpu_submitted) {
+        g_gpu_submitted = false;
+        return ORBIS_OK;
     }
 
     // Impossible to perform GPU submits
@@ -255,9 +417,13 @@ s32 PS4_SYSV_ABI sceVrTrackerGpuWait(const OrbisVrTrackerGpuWaitParam* param) {
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerGpuWaitAndCpuProcess() {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker, "sceVrTrackerGpuWaitAndCpuProcess submitted={}", g_gpu_submitted);
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
+    }
+    if (VR::IsPsvrEnabled() && g_gpu_submitted) {
+        g_gpu_submitted = false;
+        return ORBIS_OK;
     }
 
     // Impossible to perform GPU submits
@@ -266,12 +432,14 @@ s32 PS4_SYSV_ABI sceVrTrackerGpuWaitAndCpuProcess() {
 
 s32 PS4_SYSV_ABI
 sceVrTrackerNotifyEndOfCpuProcess(const OrbisVrTrackerNotifyEndOfCpuProcessParam* param) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker, "sceVrTrackerNotifyEndOfCpuProcess");
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerRecalibrate(const OrbisVrTrackerRecalibrateParam* param) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker, "sceVrTrackerRecalibrate device_type={} calibration_type={}",
+             param ? static_cast<s32>(param->device_type) : -1,
+             param ? static_cast<s32>(param->calibration_type) : -1);
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -283,8 +451,11 @@ s32 PS4_SYSV_ABI sceVrTrackerRecalibrate(const OrbisVrTrackerRecalibrateParam* p
     OrbisVrTrackerDeviceType device_type = param->device_type;
     switch (device_type) {
     case OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_HMD: {
-        // Seems like the lack of a connected hmd results in this?
-        return ORBIS_VR_TRACKER_ERROR_DEVICE_NOT_REGISTERED;
+        if (!VR::IsPsvrEnabled() || g_hmd_handle == -1) {
+            // Seems like the lack of a connected hmd results in this?
+            return ORBIS_VR_TRACKER_ERROR_DEVICE_NOT_REGISTERED;
+        }
+        VR::Recenter();
         break;
     }
     case OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_DUALSHOCK4: {
@@ -316,13 +487,18 @@ s32 PS4_SYSV_ABI sceVrTrackerRecalibrate(const OrbisVrTrackerRecalibrateParam* p
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerResetAll() {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker, "sceVrTrackerResetAll");
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerResetOrientationRelative(const OrbisVrTrackerDeviceType device_type,
                                                       const s32 handle) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker, "sceVrTrackerResetOrientationRelative device_type={} handle={:#x}",
+             static_cast<s32>(device_type), handle);
+    if (VR::IsPsvrEnabled() &&
+        device_type == OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_HMD) {
+        VR::Recenter();
+    }
     return ORBIS_OK;
 }
 
@@ -333,7 +509,9 @@ s32 PS4_SYSV_ABI sceVrTrackerSaveInternalBuffers() {
 
 s32 PS4_SYSV_ABI sceVrTrackerSetDurationUntilStatusNotTracking(
     const OrbisVrTrackerDeviceType device_type, const u32 duration_camera_frames) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker,
+             "sceVrTrackerSetDurationUntilStatusNotTracking device_type={} frames={}",
+             static_cast<s32>(device_type), duration_camera_frames);
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -362,7 +540,10 @@ s32 PS4_SYSV_ABI sceVrTrackerSetRestingMode() {
 
 s32 PS4_SYSV_ABI
 sceVrTrackerUpdateMotionSensorData(const OrbisVrTrackerUpdateMotionSensorDataParam* param) {
-    LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    VR_TRACE(Lib_VrTracker,
+             "sceVrTrackerUpdateMotionSensorData device_type={} mode={} handle={:#x}",
+             param ? static_cast<s32>(param->device_type) : -1,
+             param ? static_cast<s32>(param->operation_mode) : -1, param ? param->handle : -1);
     return ORBIS_OK;
 }
 
@@ -442,7 +623,7 @@ s32 PS4_SYSV_ABI sceVrTrackerStopLiveCapture() {
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerUnregisterDevice(const s32 handle) {
-    LOG_DEBUG(Lib_VrTracker, "called");
+    VR_TRACE(Lib_VrTracker, "sceVrTrackerUnregisterDevice handle={:#x}", handle);
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }

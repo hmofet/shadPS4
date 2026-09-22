@@ -117,6 +117,10 @@ private:
     const std::vector<std::string> hideCursorOptions = {"Never", "Idle", "Always"};
     const std::vector<std::string> trophySideOptions = {"left", "right", "top", "bottom"};
     const std::vector<std::string> readbacksModeOptions = {"Disabled", "Relaxed", "Precise"};
+    const std::vector<std::string> vrPoseSourceOptions = {"openxr", "desk", "static"};
+    const std::vector<std::string> vrEyeSourceOptions = {"sbs", "mono"};
+    const std::vector<std::string> vrFovModeOptions = {"native", "psvr"};
+    const std::vector<std::string> vrMirrorOptions = {"full", "left", "right"};
     // Windows static guest red-zone protection
     const std::vector<std::string> windowsGuestRedZoneProtectionModeOptions = {"Disabled",
                                                                                "Static Patching"};
@@ -170,6 +174,12 @@ private:
     bool pipelineCacheArchiveSetting;
     int extraDmemSetting;
     int vblankFrequencySetting;
+    bool psvrEnabledSetting;
+    int vrPoseSourceSetting;
+    int vrEyeSourceSetting;
+    int vrFovModeSetting;
+    int vrMirrorSetting;
+    float vrRenderScaleSetting;
 };
 
 } // namespace ImGuiEmuSettings

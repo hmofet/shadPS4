@@ -7,6 +7,10 @@
 #include "core/libraries/kernel/equeue.h"
 #include "core/libraries/videoout/buffer.h"
 
+namespace AmdGpu {
+struct Image;
+}
+
 namespace Core::Loader {
 class SymbolsResolver;
 }
@@ -140,6 +144,10 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
 
 // Internal system functions
 s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, void** unk);
+
+// Presents a frame libSceHmdReprojection was given (one texture descriptor per eye) as a flip of
+// the main port. Returns false when the frame was dropped.
+bool SubmitHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image& right);
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym);
 

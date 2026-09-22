@@ -9,8 +9,10 @@
 #include "core/libraries/error_codes.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/libraries/kernel/process.h"
+#include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
 #include "core/memory.h"
+#include "core/vr/vr_service.h"
 
 #include <utility>
 
@@ -29,6 +31,17 @@ static u8 *raw8_buffer1{}, *raw8_buffer2{};
 
 SDL_Camera* sdl_camera = nullptr;
 OrbisCameraConfigExtention output_config0, output_config1;
+
+// PSVR titles need a PlayStation Camera to track the headset, but only hand its frames to
+// libSceVrTracker, which gets its poses elsewhere. With PSVR enabled and no host camera selected,
+// a virtual camera delivers blank frames at 60 Hz.
+static bool g_virtual_started = false;
+static u64 g_virtual_start_time = 0;
+static constexpr u64 VirtualFrameIntervalUs = 16'667;
+
+static bool UseVirtualCamera() {
+    return VR::IsPsvrEnabled() && EmulatorSettings.GetCameraId() == -1;
+}
 
 s32 PS4_SYSV_ABI sceCameraAccGetData() {
     LOG_ERROR(Lib_Camera, "(STUBBED) called");
@@ -445,6 +458,36 @@ static s32 SizeOfFormat(OrbisCameraBaseFormat const f) {
     }
 }
 
+static s32 GetVirtualFrameData(OrbisCameraFrameData* frame_data) {
+    if (!g_virtual_started) {
+        return ORBIS_CAMERA_ERROR_NOT_START;
+    }
+    const u64 now = Libraries::Kernel::sceKernelGetProcessTime();
+    const u64 frame = (now - g_virtual_start_time) / VirtualFrameIntervalUs;
+    const OrbisCameraBaseFormat formats[2] = {output_config0.format.formatLevel0,
+                                              output_config1.format.formatLevel0};
+    void* buffers[2][2] = {{raw16_buffer1, raw8_buffer1}, {raw16_buffer2, raw8_buffer2}};
+    for (u32 dev = 0; dev < 2; dev++) {
+        const OrbisCameraBaseFormat format = formats[dev];
+        const bool used = format != ORBIS_CAMERA_FORMAT_NO_USE;
+        frame_data->pFramePointerList[dev][0] =
+            !used ? nullptr : buffers[dev][format == ORBIS_CAMERA_FORMAT_RAW8 ? 1 : 0];
+        frame_data->frameSize[dev][0] = used ? c_width * c_height * SizeOfFormat(format) : 0;
+        frame_data->status[dev] = 0;
+        frame_data->meta.format[dev][0] = format;
+        frame_data->meta.frame[dev] = frame;
+        frame_data->meta.timestamp[dev] = now;
+        frame_data->meta.deviceTimestamp[dev] = static_cast<u32>(now);
+    }
+    if (frame_data->sizeThis == 584) {
+        frame_data->pFramePointerListGarlic[0][0] = frame_data->pFramePointerList[0][0];
+        frame_data->pFramePointerListGarlic[1][0] = frame_data->pFramePointerList[1][0];
+    }
+    VR_TRACE(Lib_Camera, "sceCameraGetFrameData (virtual) frame={} formats={},{}", frame,
+             static_cast<u32>(formats[0]), static_cast<u32>(formats[1]));
+    return ORBIS_OK;
+}
+
 s32 PS4_SYSV_ABI sceCameraGetFrameData(s32 handle, OrbisCameraFrameData* frame_data) {
     LOG_DEBUG(Lib_Camera, "called");
     if (frame_data == nullptr) {
@@ -454,6 +497,12 @@ s32 PS4_SYSV_ABI sceCameraGetFrameData(s32 handle, OrbisCameraFrameData* frame_d
     frame_data->status[1] = -1;
     if (handle < 1 || frame_data->sizeThis > 584) {
         return ORBIS_CAMERA_ERROR_PARAM;
+    }
+    if (UseVirtualCamera()) {
+        if (!g_library_opened) {
+            return ORBIS_CAMERA_ERROR_NOT_OPEN;
+        }
+        return GetVirtualFrameData(frame_data);
     }
     if (!g_library_opened || !sdl_camera) {
         return ORBIS_CAMERA_ERROR_NOT_OPEN;
@@ -691,6 +740,9 @@ s32 PS4_SYSV_ABI sceCameraIsAttached(s32 index) {
         return ORBIS_CAMERA_ERROR_PARAM;
     }
     // 0 = disconnected, 1 = connected
+    if (UseVirtualCamera()) {
+        return 1;
+    }
     return EmulatorSettings.GetCameraId() == -1 ? 0 : 1;
 }
 
@@ -840,7 +892,7 @@ s32 PS4_SYSV_ABI sceCameraSetConfig(s32 handle, OrbisCameraConfig* config) {
         LOG_ERROR(Lib_Camera, "ORBIS_CAMERA_ERROR_NOT_OPEN");
         return ORBIS_CAMERA_ERROR_NOT_OPEN;
     }
-    if (EmulatorSettings.GetCameraId() == -1) {
+    if (EmulatorSettings.GetCameraId() == -1 && !UseVirtualCamera()) {
         LOG_ERROR(Lib_Camera, "ORBIS_CAMERA_ERROR_NOT_CONNECTED");
         return ORBIS_CAMERA_ERROR_NOT_CONNECTED;
     }
@@ -1126,6 +1178,17 @@ s32 PS4_SYSV_ABI sceCameraStart(s32 handle, OrbisCameraStartParameter* param) {
         LOG_ERROR(Lib_Camera, "Downscaled image retrieval isn't supported yet!");
     }
 
+    if (UseVirtualCamera()) {
+        LOG_INFO(Lib_Camera, "Starting the virtual PSVR camera");
+        std::memset(raw16_buffer1, 0, c_width * c_height * sizeof(u16));
+        std::memset(raw16_buffer2, 0, c_width * c_height * sizeof(u16));
+        std::memset(raw8_buffer1, 0, c_width * c_height * sizeof(u8));
+        std::memset(raw8_buffer2, 0, c_width * c_height * sizeof(u8));
+        g_virtual_start_time = Libraries::Kernel::sceKernelGetProcessTime();
+        g_virtual_started = true;
+        return ORBIS_OK;
+    }
+
     SDL_CameraID* devices = NULL;
     int devcount = 0;
     devices = SDL_GetCameras(&devcount);
@@ -1215,6 +1278,7 @@ s32 PS4_SYSV_ABI sceCameraStop(s32 handle) {
     if (!g_library_opened) {
         return ORBIS_CAMERA_ERROR_NOT_OPEN;
     }
+    g_virtual_started = false;
 
     return ORBIS_OK;
 }

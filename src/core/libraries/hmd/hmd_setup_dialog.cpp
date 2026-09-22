@@ -6,45 +6,53 @@
 #include "core/libraries/error_codes.h"
 #include "core/libraries/hmd/hmd_setup_dialog.h"
 #include "core/libraries/libs.h"
+#include "core/vr/vr_service.h"
 
 namespace Libraries::HmdSetupDialog {
 
+// There is no dialog to show. On real hardware it asks the player to connect the headset; with
+// PSVR enabled the headset is already "connected", so the dialog finishes at once with OK.
+// Without it, the player is taken to have pressed circle to cancel.
+
 s32 PS4_SYSV_ABI sceHmdSetupDialogInitialize() {
-    LOG_ERROR(Lib_HmdSetupDialog, "(STUBBED) called");
+    VR_TRACE(Lib_HmdSetupDialog, "sceHmdSetupDialogInitialize");
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceHmdSetupDialogClose() {
-    LOG_ERROR(Lib_HmdSetupDialog, "(STUBBED) called");
+    VR_TRACE(Lib_HmdSetupDialog, "sceHmdSetupDialogClose");
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceHmdSetupDialogOpen(const OrbisHmdSetupDialogParam* param) {
-    LOG_ERROR(Lib_HmdSetupDialog, "(STUBBED) called");
-    // On real hardware, a dialog would show up telling the user to connect a PSVR headset.
+    VR_TRACE(Lib_HmdSetupDialog, "sceHmdSetupDialogOpen user_id={} handover_disabled={}",
+             param ? param->user_id : -1, param ? param->disable_handover_screen : false);
     return ORBIS_OK;
 }
 
 s32 PS4_SYSV_ABI sceHmdSetupDialogGetResult(OrbisHmdSetupDialogResult* result) {
-    LOG_ERROR(Lib_HmdSetupDialog, "(STUBBED) called");
-    // Simulates behavior of user pressing circle to cancel the dialog.
-    // Result::OK would mean a headset was connected.
-    result->result = Libraries::CommonDialog::Result::USER_CANCELED;
+    if (result == nullptr) {
+        return static_cast<s32>(Libraries::CommonDialog::Error::PARAM_INVALID);
+    }
+    result->result = VR::IsPsvrEnabled() ? Libraries::CommonDialog::Result::OK
+                                         : Libraries::CommonDialog::Result::USER_CANCELED;
+    VR_TRACE(Lib_HmdSetupDialog, "sceHmdSetupDialogGetResult -> {}",
+             static_cast<s32>(result->result));
     return ORBIS_OK;
 }
 
 Libraries::CommonDialog::Status PS4_SYSV_ABI sceHmdSetupDialogUpdateStatus() {
-    LOG_ERROR(Lib_HmdSetupDialog, "(STUBBED) called");
+    VR_TRACE(Lib_HmdSetupDialog, "sceHmdSetupDialogUpdateStatus");
     return Libraries::CommonDialog::Status::FINISHED;
 }
 
 Libraries::CommonDialog::Status PS4_SYSV_ABI sceHmdSetupDialogGetStatus() {
-    LOG_ERROR(Lib_HmdSetupDialog, "(STUBBED) called");
+    VR_TRACE(Lib_HmdSetupDialog, "sceHmdSetupDialogGetStatus");
     return Libraries::CommonDialog::Status::FINISHED;
 }
 
 s32 PS4_SYSV_ABI sceHmdSetupDialogTerminate() {
-    LOG_ERROR(Lib_HmdSetupDialog, "(STUBBED) called");
+    VR_TRACE(Lib_HmdSetupDialog, "sceHmdSetupDialogTerminate");
     return ORBIS_OK;
 }
 

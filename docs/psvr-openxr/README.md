@@ -10,6 +10,7 @@ upstream pull request once the quality bar in `CONTRIBUTING-UPSTREAM.md` is met.
 | Doc | Contents |
 |---|---|
 | [DESIGN.md](DESIGN.md) | Architecture, per-library plan, frame flow, milestones |
+| [IMPLEMENTATION.md](IMPLEMENTATION.md) | What is built, how to enable it, and where it departs from the design |
 | [WIPEOUT-TEST-TITLE.md](WIPEOUT-TEST-TITLE.md) | WipEout Omega Collection as the first test title: what it calls, what it needs |
 | [ENHANCEMENTS.md](ENHANCEMENTS.md) | Beyond parity: resolution, refresh rate, FOV, quality options for modern headsets |
 | [CONTRIBUTING-UPSTREAM.md](CONTRIBUTING-UPSTREAM.md) | What "acceptable for upstream" means and how the work will be split into PRs |

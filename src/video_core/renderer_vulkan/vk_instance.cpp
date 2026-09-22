@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/types.h"
+#include "core/vr/vr_service.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -104,6 +105,19 @@ Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
     const std::size_t num_physical_devices = static_cast<u16>(physical_devices.size());
     ASSERT_MSG(num_physical_devices > 0, "No physical devices found");
     LOG_INFO(Render_Vulkan, "Found {} physical devices", num_physical_devices);
+
+    // A VR headset can only be fed from the GPU its runtime is attached to.
+    if (VR::UseOpenXrVulkan()) {
+        const vk::PhysicalDevice xr_device{VR::GetVulkanPhysicalDevice(*instance)};
+        const auto it = std::find(physical_devices.begin(), physical_devices.end(), xr_device);
+        if (it != physical_devices.end()) {
+            physical_device_index = static_cast<s32>(std::distance(physical_devices.begin(), it));
+            LOG_INFO(Render_Vulkan, "Using physical device {}, which drives the VR headset",
+                     physical_device_index);
+        } else {
+            VR::DisableOpenXr("the runtime's GPU is not among the Vulkan devices");
+        }
+    }
 
     if (physical_device_index < 0) {
         std::vector<
@@ -566,17 +580,40 @@ bool Instance::CreateDevice() {
         device_chain.unlink<vk::PhysicalDeviceShaderClockFeaturesKHR>();
     }
 
-    auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
-    if (device_result != vk::Result::eSuccess) {
-        LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}", vk::to_string(device_result));
-        return false;
+    // With a VR headset in use, the OpenXR runtime creates the device so it can enable what it
+    // needs to read the eye images.
+    const bool through_openxr = VR::UseOpenXrVulkan();
+    if (through_openxr) {
+        VkDevice raw_device = VK_NULL_HANDLE;
+        const VkResult xr_result = VR::CreateVulkanDevice(
+            physical_device, reinterpret_cast<const VkDeviceCreateInfo*>(&device_chain.get()),
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr, &raw_device);
+        if (xr_result == VK_SUCCESS) {
+            device = vk::UniqueDevice{vk::Device{raw_device}};
+            LOG_INFO(Render_Vulkan, "Vulkan device created through the OpenXR runtime");
+        } else {
+            VR::DisableOpenXr(fmt::format("Vulkan device creation through the runtime failed: {}",
+                                          vk::to_string(vk::Result{xr_result})));
+        }
     }
-    device = std::move(dev);
+    if (!device) {
+        auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
+        if (device_result != vk::Result::eSuccess) {
+            LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}",
+                         vk::to_string(device_result));
+            return false;
+        }
+        device = std::move(dev);
+    }
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
+
+    if (through_openxr && VR::UseOpenXrVulkan()) {
+        VR::OnVulkanDeviceCreated(*instance, physical_device, *device, queue_family_index, 0);
+    }
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =

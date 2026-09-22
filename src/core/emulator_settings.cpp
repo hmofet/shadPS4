@@ -233,6 +233,7 @@ void EmulatorSettingsImpl::ClearGameSpecificOverrides() {
     ClearGroupOverrides(m_windows_guest_red_zone_protection);
     ClearGroupOverrides(m_gpu);
     ClearGroupOverrides(m_vulkan);
+    ClearGroupOverrides(m_vr);
 }
 
 void EmulatorSettingsImpl::ResetGameSpecificValue(const std::string& key) {
@@ -262,6 +263,8 @@ void EmulatorSettingsImpl::ResetGameSpecificValue(const std::string& key) {
     if (tryGroup(m_gpu))
         return;
     if (tryGroup(m_vulkan))
+        return;
+    if (tryGroup(m_vr))
         return;
     LOG_WARNING(Config, "ResetGameSpecificValue: key '{}' not found", key);
 }
@@ -309,6 +312,10 @@ bool EmulatorSettingsImpl::Save(const std::string& serial) {
             SaveGroupGameSpecific(m_vulkan, vulkanObj);
             j["Vulkan"] = vulkanObj;
 
+            json vrObj = json::object();
+            SaveGroupGameSpecific(m_vr, vrObj);
+            j["VR"] = vrObj;
+
             std::ofstream out(path);
             if (!out) {
                 LOG_ERROR(Config, "Failed to open game config for writing: {}", path.string());
@@ -332,6 +339,7 @@ bool EmulatorSettingsImpl::Save(const std::string& serial) {
             j["Audio"] = m_audio;
             j["GPU"] = m_gpu;
             j["Vulkan"] = m_vulkan;
+            j["VR"] = m_vr;
 
             // Read the existing file so we can preserve keys unknown to this build
             json existing = json::object();
@@ -396,6 +404,7 @@ bool EmulatorSettingsImpl::Load(const std::string& serial) {
                 mergeGroup(m_audio, "Audio");
                 mergeGroup(m_gpu, "GPU");
                 mergeGroup(m_vulkan, "Vulkan");
+                mergeGroup(m_vr, "VR");
             } else {
                 if (std::filesystem::exists(Common::FS::GetUserPath(Common::FS::PathType::UserDir) /
                                             "config.toml")) {
@@ -481,6 +490,8 @@ bool EmulatorSettingsImpl::Load(const std::string& serial) {
                 ApplyGroupOverrides(m_gpu, gj.at("GPU"), changed);
             if (gj.contains("Vulkan"))
                 ApplyGroupOverrides(m_vulkan, gj.at("Vulkan"), changed);
+            if (gj.contains("VR"))
+                ApplyGroupOverrides(m_vr, gj.at("VR"), changed);
 
             PrintChangedSummary(changed);
             EmulatorState::GetInstance()->SetGameSpecifigConfigUsed(true);
@@ -502,6 +513,7 @@ void EmulatorSettingsImpl::SetDefaultValues() {
     m_windows_guest_red_zone_protection = WindowsGuestRedZoneProtectionSettings{};
     m_gpu = GPUSettings{};
     m_vulkan = VulkanSettings{};
+    m_vr = VRSettings{};
 }
 
 bool EmulatorSettingsImpl::TransferSettings() {
@@ -762,5 +774,6 @@ std::vector<std::string> EmulatorSettingsImpl::GetAllOverrideableKeys() const {
     addGroup(m_windows_guest_red_zone_protection.GetOverrideableFields());
     addGroup(m_gpu.GetOverrideableFields());
     addGroup(m_vulkan.GetOverrideableFields());
+    addGroup(m_vr.GetOverrideableFields());
     return keys;
 }

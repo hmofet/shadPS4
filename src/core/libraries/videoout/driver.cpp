@@ -12,6 +12,8 @@
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+// After the Vulkan headers, as in vk_platform.cpp.
+#include "core/vr/vr_service.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -277,6 +279,60 @@ void VideoOutDriver::Flip(const Request& req) {
     port->prev_index = req.index;
 }
 
+bool VideoOutDriver::SubmitHmdFlip(const AmdGpu::Image& left, const AmdGpu::Image& right) {
+    // A frame handed to libSceHmdReprojection. It goes through the GPU thread like any flip, so
+    // the game's rendering of the eye textures is processed first, and completes as a flip of the
+    // main port so the game's flip events keep pacing it.
+    auto* port = &main_port;
+    s64 flip_arg;
+    {
+        std::unique_lock lock{port->port_mutex};
+        if (port->flip_status.flip_pending_num > 2) {
+            return false; // the host is behind; drop this frame rather than queue latency
+        }
+        ++port->flip_status.flip_pending_num;
+        port->flip_status.submit_tsc = Libraries::Kernel::sceKernelReadTsc();
+        flip_arg = port->flip_status.flip_arg;
+    }
+    liverpool->SendCommand([=, this]() {
+        Vulkan::Frame* frame = presenter->PrepareHmdFrame(left, right);
+        std::scoped_lock lock{mutex};
+        requests.push({
+            .frame = frame,
+            .port = port,
+            .flip_arg = flip_arg,
+            .index = -1,
+            .eop = false,
+        });
+    });
+    return true;
+}
+
+void VideoOutDriver::SignalReprojectionFlip(VideoOutPort* port) {
+    // In VR mode the game stops flipping: libSceHmdReprojection scans its eye images out to the
+    // headset, and games pace themselves (and their tracker threads) on the flip events that
+    // produces. Raise those events on each vblank without a game flip.
+    s64 flip_arg;
+    {
+        std::unique_lock lock{port->port_mutex};
+        auto& flip_status = port->flip_status;
+        flip_status.count++;
+        flip_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
+        flip_status.tsc = Libraries::Kernel::sceKernelReadTsc();
+        flip_arg = flip_status.flip_arg;
+    }
+    for (auto event : port->flip_events) {
+        auto equeue = Kernel::GetEqueue(event);
+        if (equeue != nullptr) {
+            equeue->TriggerEvent(
+                static_cast<u64>(OrbisVideoOutInternalEventId::Flip),
+                Kernel::OrbisKernelEvent::Filter::VideoOut,
+                reinterpret_cast<void*>(static_cast<u64>(OrbisVideoOutInternalEventId::Flip) |
+                                        (flip_arg << 16)));
+        }
+    }
+}
+
 void VideoOutDriver::DrawBlankFrame() {
     const auto empty_frame = presenter->PrepareBlankFrame(true);
     presenter->Present(empty_frame, false, false);
@@ -379,6 +435,11 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             } else {
                 Flip(request);
                 FRAME_END;
+            }
+            // Reprojection scans out on every vblank, re-showing the last frame when the game
+            // has not submitted a new one, and games pace on that steady stream of flip events.
+            if (!request && VR::IsPsvrEnabled() && VR::IsReprojectionActive()) {
+                SignalReprojectionFlip(&main_port);
             }
         }
 

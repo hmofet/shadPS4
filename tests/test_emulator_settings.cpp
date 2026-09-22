@@ -841,3 +841,50 @@ TEST_F(EmulatorSettingsTest, DestructorSavesAfterSuccessfulLoad) {
     verify->Load();
     EXPECT_EQ(verify->GetWindowWidth(), 2560);
 }
+
+// VR settings (PSVR through OpenXR)
+
+TEST_F(EmulatorSettingsTest, VrDefaultsKeepPsvrOff) {
+    EXPECT_FALSE(temp_settings->IsPsvrEnabled());
+    EXPECT_EQ(temp_settings->GetVrPoseSource(), "openxr");
+    EXPECT_EQ(temp_settings->GetVrEyeSource(), "sbs");
+    EXPECT_EQ(temp_settings->GetVrFovMode(), "native");
+    EXPECT_EQ(temp_settings->GetVrMirror(), "full");
+    EXPECT_FLOAT_EQ(temp_settings->GetVrRenderScale(), 1.0f);
+    EXPECT_EQ(temp_settings->GetVrRecenterKey(), "Keypad 5");
+}
+
+TEST_F(EmulatorSettingsTest, VrPerGameOverridesLoad) {
+    json game;
+    game["VR"]["psvr_enabled"] = true;
+    game["VR"]["pose_source"] = "desk";
+    game["VR"]["render_scale"] = 1.5;
+    WriteJson(GameConfig("CUSA05670"), game);
+    ASSERT_TRUE(temp_settings->Load("CUSA05670"));
+
+    EXPECT_TRUE(temp_settings->IsPsvrEnabled());
+    EXPECT_EQ(temp_settings->GetVrPoseSource(), "desk");
+    EXPECT_FLOAT_EQ(temp_settings->GetVrRenderScale(), 1.5f);
+    EXPECT_EQ(temp_settings->GetVrEyeSource(), "sbs");
+}
+
+TEST_F(EmulatorSettingsTest, VrGroupIsSavedGloballyAndPerGame) {
+    ASSERT_TRUE(temp_settings->Save());
+    const json global = ReadJson(ConfigJson());
+    ASSERT_TRUE(global.contains("VR"));
+    EXPECT_EQ(global["VR"]["psvr_enabled"], false);
+
+    temp_settings->SetPsvrEnabled(true, true);
+    ASSERT_TRUE(temp_settings->Save("CUSA05670"));
+    const json game = ReadJson(GameConfig("CUSA05670"));
+    ASSERT_TRUE(game.contains("VR"));
+    EXPECT_EQ(game["VR"]["psvr_enabled"], true);
+}
+
+TEST_F(EmulatorSettingsTest, VrKeysAreOverrideable) {
+    const auto keys = temp_settings->GetAllOverrideableKeys();
+    for (const char* key : {"psvr_enabled", "pose_source", "eye_source", "fov_mode", "mirror",
+                            "render_scale", "recenter_key"}) {
+        EXPECT_NE(std::find(keys.begin(), keys.end(), key), keys.end()) << key;
+    }
+}

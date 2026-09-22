@@ -67,38 +67,47 @@ struct OrbisHmdEyeOffset {
 };
 
 // Reprojection
-s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer();
-s32 PS4_SYSV_ABI sceHmdReprojectionAddDisplayBuffer();
-s32 PS4_SYSV_ABI sceHmdReprojectionClearUserEventEnd();
-s32 PS4_SYSV_ABI sceHmdReprojectionClearUserEventStart();
-s32 PS4_SYSV_ABI sceHmdReprojectionDebugGetLastInfo();
-s32 PS4_SYSV_ABI sceHmdReprojectionDebugGetLastInfoMultilayer();
-s32 PS4_SYSV_ABI sceHmdReprojectionFinalize();
-s32 PS4_SYSV_ABI sceHmdReprojectionFinalizeCapture();
-s32 PS4_SYSV_ABI sceHmdReprojectionInitialize();
-s32 PS4_SYSV_ABI sceHmdReprojectionInitializeCapture();
+s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionAddDisplayBuffer(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionClearUserEventEnd(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
+                                                     u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionClearUserEventStart(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
+                                                       u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionDebugGetLastInfo(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionDebugGetLastInfoMultilayer(u64 a0, u64 a1, u64 a2, u64 a3,
+                                                              u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionFinalize(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionFinalizeCapture(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionInitialize(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionInitializeCapture(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
+                                                     u64 a5);
 s32 PS4_SYSV_ABI sceHmdReprojectionQueryGarlicBuffAlign();
 s32 PS4_SYSV_ABI sceHmdReprojectionQueryGarlicBuffSize();
 s32 PS4_SYSV_ABI sceHmdReprojectionQueryOnionBuffAlign();
 s32 PS4_SYSV_ABI sceHmdReprojectionQueryOnionBuffSize();
-s32 PS4_SYSV_ABI sceHmdReprojectionSetCallback();
-s32 PS4_SYSV_ABI sceHmdReprojectionSetDisplayBuffers();
-s32 PS4_SYSV_ABI sceHmdReprojectionSetOutputMinColor();
-s32 PS4_SYSV_ABI sceHmdReprojectionSetUserEventEnd();
-s32 PS4_SYSV_ABI sceHmdReprojectionSetUserEventStart();
-s32 PS4_SYSV_ABI sceHmdReprojectionStart();
-s32 PS4_SYSV_ABI sceHmdReprojectionStart2dVr();
-s32 PS4_SYSV_ABI sceHmdReprojectionStartCapture();
-s32 PS4_SYSV_ABI sceHmdReprojectionStartLiveCapture();
-s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer2();
-s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNear();
-s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay();
-s32 PS4_SYSV_ABI sceHmdReprojectionStartWithOverlay();
-s32 PS4_SYSV_ABI sceHmdReprojectionStop();
-s32 PS4_SYSV_ABI sceHmdReprojectionStopCapture();
-s32 PS4_SYSV_ABI sceHmdReprojectionStopLiveCapture();
-s32 PS4_SYSV_ABI sceHmdReprojectionUnsetCallback();
-s32 PS4_SYSV_ABI sceHmdReprojectionUnsetDisplayBuffers();
+s32 PS4_SYSV_ABI sceHmdReprojectionSetCallback(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionSetDisplayBuffers(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
+                                                     u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionSetOutputMinColor(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
+                                                     u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionSetUserEventEnd(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionSetUserEventStart(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
+                                                     u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStart(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStart2dVr(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStartCapture(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStartLiveCapture(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer2(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNear(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
+                                                            u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStartWithOverlay(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStop(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStopCapture(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionStopLiveCapture(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionUnsetCallback(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
+s32 PS4_SYSV_ABI sceHmdReprojectionUnsetDisplayBuffers(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
+                                                       u64 a5);
 
 // Distortion
 s32 PS4_SYSV_ABI sceHmdDistortionGet2dVrCommand();
@@ -252,12 +261,12 @@ s32 PS4_SYSV_ABI Func_7C955961EA85B6D3();
 s32 PS4_SYSV_ABI Func_9952277839236BA7();
 s32 PS4_SYSV_ABI Func_9A276E739E54EEAF();
 s32 PS4_SYSV_ABI Func_9E501994E289CBE7();
-s32 PS4_SYSV_ABI Func_A31A0320D80EAD99();
+s32 PS4_SYSV_ABI Func_A31A0320D80EAD99(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
 s32 PS4_SYSV_ABI Func_A31F4DA8B3BD2E12();
 s32 PS4_SYSV_ABI Func_A92D7C23AC364993();
 s32 PS4_SYSV_ABI Func_ADCCC25CB876FDBE();
 s32 PS4_SYSV_ABI Func_B16652641FE69F0E();
-s32 PS4_SYSV_ABI Func_B9A6FA0735EC7E49();
+s32 PS4_SYSV_ABI Func_B9A6FA0735EC7E49(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5);
 s32 PS4_SYSV_ABI Func_FC193BD653F2AF2E();
 s32 PS4_SYSV_ABI Func_FF2E0E53015FE231();
 

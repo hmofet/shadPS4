@@ -11,6 +11,10 @@
 #include <mutex>
 #include <queue>
 
+namespace AmdGpu {
+struct Image;
+}
+
 namespace Vulkan {
 struct Frame;
 }
@@ -91,6 +95,7 @@ public:
                               const BufferAttribute* attribute);
 
     bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+    bool SubmitHmdFlip(const AmdGpu::Image& left, const AmdGpu::Image& right);
 
 private:
     struct Request {
@@ -106,8 +111,9 @@ private:
     };
 
     void Flip(const Request& req);
-    void DrawBlankFrame(); // Video port out not open
-    void DrawLastFrame();  // Used when there is no flip request
+    void DrawBlankFrame();                           // Video port out not open
+    void DrawLastFrame();                            // Used when there is no flip request
+    void SignalReprojectionFlip(VideoOutPort* port); // VR mode: flips done by reprojection
     void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
     void PresentThread(std::stop_token token);
 

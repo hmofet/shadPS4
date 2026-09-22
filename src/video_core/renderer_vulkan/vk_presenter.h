@@ -9,6 +9,7 @@
 #include "imgui/imgui_texture.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
+#include "video_core/renderer_vulkan/host_passes/vr_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
@@ -97,6 +98,11 @@ public:
 
     Frame* PrepareBlankFrame(bool present_thread);
 
+    // VR mode: presents the eye textures a game handed to libSceHmdReprojection. The window
+    // shows one eye; the headset gets both.
+    Frame* PrepareHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image& right);
+    bool ReceivingHmdFrames() const;
+
     void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
     Frame* PrepareLastFrame();
 
@@ -118,6 +124,7 @@ private:
     HostPasses::FsrPass::Settings fsr_settings{};
     HostPasses::PostProcessingPass::Settings pp_settings{};
     HostPasses::PostProcessingPass pp_pass;
+    HostPasses::VrPass vr_pass;
     AmdGpu::Liverpool* liverpool;
     Scheduler draw_scheduler;
     Scheduler present_scheduler;
@@ -134,6 +141,7 @@ private:
     std::condition_variable_any frame_cv;
     std::optional<ImGui::RefCountedTexture> splash_img;
     std::vector<VAddr> vo_buffers_addr;
+    std::atomic<s64> last_hmd_frame_ns{0};
 };
 
 } // namespace Vulkan

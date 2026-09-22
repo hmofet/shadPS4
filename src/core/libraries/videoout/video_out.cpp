@@ -342,6 +342,10 @@ s32 PS4_SYSV_ABI sceVideoOutGetBufferLabelAddress(s32 handle, uintptr_t* label_a
     return 16;
 }
 
+bool SubmitHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image& right) {
+    return driver != nullptr && driver->SubmitHmdFlip(left, right);
+}
+
 s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, void** unk) {
     auto* port = driver->GetPort(handle);
     if (!port) {

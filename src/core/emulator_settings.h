@@ -511,6 +511,40 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(VulkanSettings, gpu_id, renderdoc_enabled, vk
                                    pipeline_cache_archived)
 
 // -------------------------------
+// VR settings (PSVR libraries backed by OpenXR)
+// -------------------------------
+struct VRSettings {
+    // Report a connected, tracking PSVR headset to the game.
+    Setting<bool> psvr_enabled{false};
+    // Where head poses come from: "openxr", "desk" (keyboard driven) or "static".
+    Setting<std::string> pose_source{"openxr"};
+    // Which part of the flipped frame goes to each eye: "sbs" (left/right halves) or "mono".
+    Setting<std::string> eye_source{"sbs"};
+    // FOV reported to the game: "native" (the real headset) or "psvr" (original PSVR values).
+    Setting<std::string> fov_mode{"native"};
+    // What the desktop window shows while the game is in VR mode: "full", "left" or "right".
+    Setting<std::string> mirror{"full"};
+    // Multiplier on the panel resolution reported to the game.
+    Setting<float> render_scale{1.0f};
+    // SDL scancode name of the key that recenters the view.
+    Setting<std::string> recenter_key{"Keypad 5"};
+
+    std::vector<OverrideItem> GetOverrideableFields() const {
+        return std::vector<OverrideItem>{
+            make_override<VRSettings>("psvr_enabled", &VRSettings::psvr_enabled),
+            make_override<VRSettings>("pose_source", &VRSettings::pose_source),
+            make_override<VRSettings>("eye_source", &VRSettings::eye_source),
+            make_override<VRSettings>("fov_mode", &VRSettings::fov_mode),
+            make_override<VRSettings>("mirror", &VRSettings::mirror),
+            make_override<VRSettings>("render_scale", &VRSettings::render_scale),
+            make_override<VRSettings>("recenter_key", &VRSettings::recenter_key),
+        };
+    }
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(VRSettings, psvr_enabled, pose_source, eye_source, fov_mode,
+                                   mirror, render_scale, recenter_key)
+
+// -------------------------------
 // Main manager
 // -------------------------------
 class EmulatorSettingsImpl {
@@ -572,6 +606,7 @@ private:
     WindowsGuestRedZoneProtectionSettings m_windows_guest_red_zone_protection{};
     GPUSettings m_gpu{};
     VulkanSettings m_vulkan{};
+    VRSettings m_vr{};
     ConfigMode m_configMode{ConfigMode::Default};
 
     // Runtime-only override: when true, IsShadNetEnabled() reports false for the
@@ -633,6 +668,9 @@ public:
     }
     std::vector<OverrideItem> GetVulkanOverrideableFields() const {
         return m_vulkan.GetOverrideableFields();
+    }
+    std::vector<OverrideItem> GetVROverrideableFields() const {
+        return m_vr.GetOverrideableFields();
     }
     std::vector<std::string> GetAllOverrideableKeys() const;
 
@@ -789,6 +827,15 @@ public:
     SETTING_FORWARD_BOOL(m_vulkan, VkGuestMarkersEnabled, vkguest_markers)
     SETTING_FORWARD_BOOL(m_vulkan, PipelineCacheEnabled, pipeline_cache_enabled)
     SETTING_FORWARD_BOOL(m_vulkan, PipelineCacheArchived, pipeline_cache_archived)
+
+    // VR settings
+    SETTING_FORWARD_BOOL(m_vr, PsvrEnabled, psvr_enabled)
+    SETTING_FORWARD(m_vr, VrPoseSource, pose_source)
+    SETTING_FORWARD(m_vr, VrEyeSource, eye_source)
+    SETTING_FORWARD(m_vr, VrFovMode, fov_mode)
+    SETTING_FORWARD(m_vr, VrMirror, mirror)
+    SETTING_FORWARD(m_vr, VrRenderScale, render_scale)
+    SETTING_FORWARD(m_vr, VrRecenterKey, recenter_key)
 
 #undef SETTING_FORWARD
 #undef SETTING_FORWARD_BOOL

@@ -98,6 +98,13 @@ void SettingsWindow::LoadSettings(std::string profile) {
         pipelineCacheArchiveSetting = EmulatorSettings.IsPipelineCacheArchived();
         extraDmemSetting = EmulatorSettings.GetExtraDmemInMBytes();
         vblankFrequencySetting = EmulatorSettings.GetVblankFrequency();
+        psvrEnabledSetting = EmulatorSettings.IsPsvrEnabled();
+        vrPoseSourceSetting =
+            GetComboIndex(EmulatorSettings.GetVrPoseSource(), vrPoseSourceOptions);
+        vrEyeSourceSetting = GetComboIndex(EmulatorSettings.GetVrEyeSource(), vrEyeSourceOptions);
+        vrFovModeSetting = GetComboIndex(EmulatorSettings.GetVrFovMode(), vrFovModeOptions);
+        vrMirrorSetting = GetComboIndex(EmulatorSettings.GetVrMirror(), vrMirrorOptions);
+        vrRenderScaleSetting = EmulatorSettings.GetVrRenderScale();
     }
 }
 
@@ -158,6 +165,12 @@ void SettingsWindow::SaveSettings(std::string profile) {
         EmulatorSettings.SetPipelineCacheArchived(pipelineCacheArchiveSetting, true);
         EmulatorSettings.SetExtraDmemInMBytes(extraDmemSetting, true);
         EmulatorSettings.SetVblankFrequency(vblankFrequencySetting, true);
+        EmulatorSettings.SetPsvrEnabled(psvrEnabledSetting, true);
+        EmulatorSettings.SetVrPoseSource(vrPoseSourceOptions.at(vrPoseSourceSetting), true);
+        EmulatorSettings.SetVrEyeSource(vrEyeSourceOptions.at(vrEyeSourceSetting), true);
+        EmulatorSettings.SetVrFovMode(vrFovModeOptions.at(vrFovModeSetting), true);
+        EmulatorSettings.SetVrMirror(vrMirrorOptions.at(vrMirrorSetting), true);
+        EmulatorSettings.SetVrRenderScale(vrRenderScaleSetting, true);
     }
 
     isSpecific ? EmulatorSettings.Save(profile) : EmulatorSettings.Save();
@@ -782,6 +795,16 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             if (pipelineCacheEnabledSetting) {
                 AddSettingCheckbox("Compress Shader Cache to Zip File",
                                    pipelineCacheArchiveSetting);
+            }
+
+            // PSVR through OpenXR; read when the game starts, so changes need a restart.
+            AddSettingCheckbox("Enable PSVR (Requires Restart)", psvrEnabledSetting);
+            if (psvrEnabledSetting) {
+                AddSettingCombo("VR Head Tracking", vrPoseSourceSetting, vrPoseSourceOptions);
+                AddSettingCombo("VR Eye Images", vrEyeSourceSetting, vrEyeSourceOptions);
+                AddSettingCombo("VR Field of View", vrFovModeSetting, vrFovModeOptions);
+                AddSettingCombo("VR Desktop Mirror", vrMirrorSetting, vrMirrorOptions);
+                AddSettingSliderFloat("VR Render Scale", vrRenderScaleSetting, 1, 2, 2);
             }
 
             ImGui::EndTable();

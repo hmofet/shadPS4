@@ -22,6 +22,9 @@
 #include "core/emulator_settings.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+// After the window and Vulkan headers: with the Xlib platform macro defined above, vulkan.h pulls
+// in X11 headers whose macros break headers included after it.
+#include "core/vr/vr_service.h"
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -271,8 +274,9 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
 #endif
 
     static vk::detail::DynamicLoader dl;
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(
-        dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
+    const auto get_instance_proc_addr =
+        dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(get_instance_proc_addr);
 
     const auto [available_version_result, available_version] =
         VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion
@@ -413,9 +417,28 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
         },
     };
 
-    auto [instance_result, instance] = vk::createInstanceUnique(instance_ci_chain.get());
-    ASSERT_MSG(instance_result == vk::Result::eSuccess, "Failed to create instance: {}",
-               vk::to_string(instance_result));
+    vk::UniqueInstance instance{};
+    // With a VR headset in use, the OpenXR runtime creates the instance so it can add the
+    // extensions it needs to share images with the emulator.
+    if (window_type != Frontend::WindowSystemType::Headless && VR::UseOpenXrVulkan()) {
+        VkInstance raw_instance = VK_NULL_HANDLE;
+        const VkResult xr_result = VR::CreateVulkanInstance(
+            reinterpret_cast<const VkInstanceCreateInfo*>(&instance_ci_chain.get()),
+            get_instance_proc_addr, &raw_instance);
+        if (xr_result == VK_SUCCESS) {
+            instance = vk::UniqueInstance{vk::Instance{raw_instance}};
+            LOG_INFO(Render_Vulkan, "Vulkan instance created through the OpenXR runtime");
+        } else {
+            VR::DisableOpenXr(fmt::format("Vulkan instance creation through the runtime failed: {}",
+                                          vk::to_string(vk::Result{xr_result})));
+        }
+    }
+    if (!instance) {
+        auto [instance_result, new_instance] = vk::createInstanceUnique(instance_ci_chain.get());
+        ASSERT_MSG(instance_result == vk::Result::eSuccess, "Failed to create instance: {}",
+                   vk::to_string(instance_result));
+        instance = std::move(new_instance);
+    }
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*instance);
 

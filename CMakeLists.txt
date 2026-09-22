@@ -37,6 +37,7 @@ include(CMakeDependentOption)
 cmake_dependent_option(ENABLE_SYSTEM_VULKAN "Enable the system Vulkan driver" OFF APPLE OFF)
 
 option(ENABLE_DISCORD_RPC "Enable the Discord RPC integration" ON)
+cmake_dependent_option(ENABLE_OPENXR "Enable PSVR output to PC VR headsets through OpenXR" ON "NOT APPLE" OFF)
 option(ENABLE_UPDATER "Enables the options to updater" ON)
 option(ENABLE_TESTS "Build unit tests (requires GTest)" OFF)
 option(ENABLE_SYSTEM_LIBRARIES "Enable building against system libraries" OFF)
@@ -713,7 +714,17 @@ set(VR_LIBS  src/core/libraries/hmd/hmd.cpp
              src/core/libraries/hmd/hmd_setup_dialog.h
              src/core/libraries/vr_tracker/vr_tracker.cpp
              src/core/libraries/vr_tracker/vr_tracker.h
+             src/core/vr/desk_pose_source.cpp
+             src/core/vr/openxr_runtime.h
+             src/core/vr/pose_source.h
+             src/core/vr/vr_service.cpp
+             src/core/vr/vr_service.h
+             src/core/vr/vr_types.h
 )
+
+if (ENABLE_OPENXR)
+    list(APPEND VR_LIBS src/core/vr/openxr_runtime.cpp)
+endif()
 
 set(MISC_LIBS  src/core/libraries/screenshot/screenshot.cpp
                src/core/libraries/screenshot/screenshot.h
@@ -1146,6 +1157,8 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/host_passes/fsr_pass.h
                src/video_core/renderer_vulkan/host_passes/pp_pass.cpp
                src/video_core/renderer_vulkan/host_passes/pp_pass.h
+               src/video_core/renderer_vulkan/host_passes/vr_pass.cpp
+               src/video_core/renderer_vulkan/host_passes/vr_pass.h
                src/video_core/texture_cache/blit_helper.cpp
                src/video_core/texture_cache/blit_helper.h
                src/video_core/texture_cache/host_compatibility.cpp
@@ -1294,6 +1307,11 @@ target_compile_definitions(Dear_ImGui PRIVATE IMGUI_USER_CONFIG="${PROJECT_SOURC
 
 if (ENABLE_DISCORD_RPC)
     target_compile_definitions(shadps4 PRIVATE ENABLE_DISCORD_RPC)
+endif()
+
+if (ENABLE_OPENXR)
+    target_compile_definitions(shadps4 PRIVATE ENABLE_OPENXR)
+    target_link_libraries(shadps4 PRIVATE OpenXR::openxr_loader)
 endif()
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
