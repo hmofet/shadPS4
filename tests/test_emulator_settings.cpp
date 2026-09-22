@@ -852,6 +852,7 @@ TEST_F(EmulatorSettingsTest, VrDefaultsKeepPsvrOff) {
     EXPECT_EQ(temp_settings->GetVrMirror(), "full");
     EXPECT_FLOAT_EQ(temp_settings->GetVrRenderScale(), 1.0f);
     EXPECT_EQ(temp_settings->GetVrRecenterKey(), "Keypad 5");
+    EXPECT_EQ(temp_settings->GetVrHmdRefreshHz(), 120u);
 }
 
 TEST_F(EmulatorSettingsTest, VrPerGameOverridesLoad) {

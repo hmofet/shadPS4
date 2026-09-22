@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -124,6 +126,14 @@ struct OpenXrRuntime::Impl {
     std::array<Swapchain, EyeCount> swapchains{};
     XrFrameState frame_state{XR_TYPE_FRAME_STATE};
     u64 guest_time_at_wait = 0;
+
+    // Frames waited for (WaitFrame) but not yet begun (BeginFrame), oldest first.
+    struct PendingFrame {
+        XrFrameState state;
+        u64 guest_time_at_wait;
+    };
+    std::deque<PendingFrame> pending_frames;
+    static constexpr size_t MaxPendingFrames = 3;
 
     // Last good view data, for FOV and IPD queries.
     std::array<FovTangents, EyeCount> eye_fov{};
@@ -536,6 +546,7 @@ void OpenXrRuntime::DestroySession() {
         xrEndSession(d.session);
         d.running = false;
     }
+    d.pending_frames.clear();
     d.DestroySwapchains();
     for (XrSpace* space : {&d.app_space, &d.view_space, &d.local_space}) {
         if (*space != XR_NULL_HANDLE) {
@@ -580,28 +591,91 @@ bool OpenXrRuntime::IsSessionRunning() const {
     return impl->running && impl->swapchains[0].handle != XR_NULL_HANDLE;
 }
 
+bool OpenXrRuntime::WaitFrame() {
+    auto& d = *impl;
+    XrSession session;
+    {
+        std::scoped_lock lk{d.mutex};
+        if (!d.running || d.swapchains[0].handle == XR_NULL_HANDLE ||
+            d.pending_frames.size() >= Impl::MaxPendingFrames) {
+            return false;
+        }
+        session = d.session;
+    }
+    // Outside the lock: this blocks until the runtime wants the next frame, and until the
+    // previous frame has been begun on the GPU thread.
+    const XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState frame_state{XR_TYPE_FRAME_STATE};
+    if (!d.Check(xrWaitFrame(session, &wait_info, &frame_state), "xrWaitFrame")) {
+        return false;
+    }
+    std::scoped_lock lk{d.mutex};
+    d.pending_frames.push_back({frame_state, Libraries::Kernel::sceKernelGetProcessTime()});
+    return true;
+}
+
+void OpenXrRuntime::DiscardPendingFrame() {
+    auto& d = *impl;
+    std::scoped_lock lk{d.mutex};
+    if (d.pending_frames.empty()) {
+        return;
+    }
+    const Impl::PendingFrame pending = d.pending_frames.front();
+    d.pending_frames.pop_front();
+    if (!d.running) {
+        return;
+    }
+    const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
+    if (!d.Check(xrBeginFrame(d.session, &begin_info), "xrBeginFrame (discard)")) {
+        return;
+    }
+    const XrFrameEndInfo end_info{
+        .type = XR_TYPE_FRAME_END_INFO,
+        .displayTime = pending.state.predictedDisplayTime,
+        .environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE,
+        .layerCount = 0,
+        .layers = nullptr,
+    };
+    d.Check(xrEndFrame(d.session, &end_info), "xrEndFrame (discard)");
+}
+
 bool OpenXrRuntime::BeginFrame(std::array<EyeTarget, EyeCount>& targets, bool& should_render) {
     auto& d = *impl;
     should_render = false;
     XrSession session;
+    std::optional<Impl::PendingFrame> pending;
     {
         std::scoped_lock lk{d.mutex};
+        // A frame WaitFrame paced for us belongs to this BeginFrame whether or not the session
+        // is still usable, so it is taken off the queue first.
+        if (!d.pending_frames.empty()) {
+            pending = d.pending_frames.front();
+            d.pending_frames.pop_front();
+        }
         if (!d.running || d.swapchains[0].handle == XR_NULL_HANDLE) {
             return false;
         }
         session = d.session;
     }
 
-    // Pacing wait, outside the lock so pose queries from game threads are not held up.
-    const XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frame_state{XR_TYPE_FRAME_STATE};
-    if (!d.Check(xrWaitFrame(session, &wait_info, &frame_state), "xrWaitFrame")) {
-        return false;
+    u64 guest_time_at_wait;
+    if (pending) {
+        frame_state = pending->state;
+        guest_time_at_wait = pending->guest_time_at_wait;
+    } else {
+        // Nobody paced this frame ahead of time: wait here, outside the lock so pose queries
+        // from game threads are not held up.
+        const XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
+        if (!d.Check(xrWaitFrame(session, &wait_info, &frame_state), "xrWaitFrame")) {
+            return false;
+        }
+        guest_time_at_wait = Libraries::Kernel::sceKernelGetProcessTime();
     }
 
     std::scoped_lock lk{d.mutex};
     d.frame_state = frame_state;
-    d.guest_time_at_wait = Libraries::Kernel::sceKernelGetProcessTime();
+    d.guest_time_at_wait = guest_time_at_wait;
     const XrFrameBeginInfo begin_info{XR_TYPE_FRAME_BEGIN_INFO};
     if (!d.Check(xrBeginFrame(session, &begin_info), "xrBeginFrame")) {
         return false;

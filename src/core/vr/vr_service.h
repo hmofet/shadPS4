@@ -7,6 +7,7 @@
 #include <atomic>
 #include <string_view>
 #include "common/logging/log.h"
+#include "core/vr/hmd_frame.h"
 #include "core/vr/openxr_runtime.h"
 #include "core/vr/pose_source.h"
 
@@ -62,6 +63,12 @@ void GetPanelResolution(u32& width, u32& height);
 // kept as the pose the game is rendering with, which the frame submit reports to the runtime.
 bool SampleHead(u64 guest_time_us, bool is_render_pose, TrackingSample& out);
 void Recenter();
+
+// The views a frame handed to libSceHmdReprojection was rendered with. The head pose in `info`
+// is matched against the samples recently given to the game, so the eye poses are the exact
+// ones it rendered from; a pose that matches none is used as is with the headset's IPD. Missing
+// parts are filled from the last render sample and the FOV reported to the game.
+HmdFrameViews ResolveRenderViews(const HmdFrameInfo& info);
 // Recenters when the configured recenter key goes down. Called from the tracker's result path.
 void PollRecenterKey();
 
@@ -69,6 +76,15 @@ void PollRecenterKey();
 
 void SetReprojectionActive(bool active, std::string_view variant);
 bool IsReprojectionActive();
+
+// Vblank rate the video output should run at while in VR mode (a PSVR panel is driven at 120 or
+// 90 Hz), or 0 to keep the configured vblank frequency.
+u32 GetHmdVblankHz();
+
+// Called on the game's submit thread for every frame accepted for the headset: counts the
+// game's frame rate for the log, and paces the game there by waiting for the runtime's next
+// frame slot (OpenXrRuntime::WaitFrame) instead of on the GPU thread.
+void OnHmdFrameAccepted();
 
 // ---- Vulkan interop, called by the Vulkan backend --------------------------------------------
 
@@ -97,9 +113,12 @@ struct FrameSubmit {
     std::array<EyeTarget, EyeCount> targets{};
 };
 
-// May block in xrWaitFrame for pacing when the headset is displaying.
+// Blocks in xrWaitFrame for pacing when the headset is displaying and OnHmdFrameAccepted did
+// not already wait for this frame.
 FrameSubmit BeginFrame();
-// The caller must hold the Vulkan queue submit lock; see OpenXrRuntime::EndFrame.
-void EndFrame(const FrameSubmit& frame, bool rendered);
+// The caller must hold the Vulkan queue submit lock; see OpenXrRuntime::EndFrame. `views` are
+// the poses and FOV the frame was rendered with (ResolveRenderViews); without them the last
+// sample the game was given is used.
+void EndFrame(const FrameSubmit& frame, bool rendered, const HmdFrameViews* views = nullptr);
 
 } // namespace VR

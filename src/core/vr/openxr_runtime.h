@@ -27,13 +27,6 @@ struct EyeTarget {
     VkFormat format = VK_FORMAT_UNDEFINED;
 };
 
-// What the renderer used for one eye: submitted back to the runtime with the image so it can
-// reproject from the right place.
-struct EyeView {
-    Pose pose{};
-    FovTangents fov{};
-};
-
 // An OpenXR instance, system and session sharing the emulator's Vulkan device
 // (XR_KHR_vulkan_enable2). Doubles as the pose source.
 class OpenXrRuntime final : public PoseSource {
@@ -64,6 +57,15 @@ public:
     void PollEvents();
     bool IsSessionRunning() const;
 
+    // Pacing wait for the next frame, from any thread, ahead of BeginFrame. The frame state it
+    // returns is queued for the next BeginFrame, so the wait can happen on the game's submit
+    // thread while the GPU thread is still busy with the previous frame (xrWaitFrame only blocks
+    // until the previous xrBeginFrame). False when the session is not running.
+    bool WaitFrame();
+    // Begins and ends (with no layers) a frame WaitFrame paced for a submit that will not render
+    // after all, so the next xrWaitFrame is not left waiting for its xrBeginFrame. Same thread
+    // rules as BeginFrame.
+    void DiscardPendingFrame();
     // Frame loop. BeginFrame blocks in xrWaitFrame for pacing, then acquires the eye images.
     // Returns false if no frame was begun. When it returns true, EndFrame must follow; the
     // `targets` are valid only if `should_render` is true.

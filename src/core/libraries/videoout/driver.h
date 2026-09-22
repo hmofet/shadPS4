@@ -95,7 +95,8 @@ public:
                               const BufferAttribute* attribute);
 
     bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
-    bool SubmitHmdFlip(const AmdGpu::Image& left, const AmdGpu::Image& right);
+    bool SubmitHmdFlip(const AmdGpu::Image& left, const AmdGpu::Image& right,
+                       const VR::HmdFrameViews& views);
 
 private:
     struct Request {

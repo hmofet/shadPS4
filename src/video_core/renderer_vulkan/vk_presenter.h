@@ -100,7 +100,8 @@ public:
 
     // VR mode: presents the eye textures a game handed to libSceHmdReprojection. The window
     // shows one eye; the headset gets both.
-    Frame* PrepareHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image& right);
+    Frame* PrepareHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image& right,
+                           const VR::HmdFrameViews& views);
     bool ReceivingHmdFrames() const;
 
     void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);

@@ -279,7 +279,8 @@ void VideoOutDriver::Flip(const Request& req) {
     port->prev_index = req.index;
 }
 
-bool VideoOutDriver::SubmitHmdFlip(const AmdGpu::Image& left, const AmdGpu::Image& right) {
+bool VideoOutDriver::SubmitHmdFlip(const AmdGpu::Image& left, const AmdGpu::Image& right,
+                                   const VR::HmdFrameViews& views) {
     // A frame handed to libSceHmdReprojection. It goes through the GPU thread like any flip, so
     // the game's rendering of the eye textures is processed first, and completes as a flip of the
     // main port so the game's flip events keep pacing it.
@@ -294,8 +295,11 @@ bool VideoOutDriver::SubmitHmdFlip(const AmdGpu::Image& left, const AmdGpu::Imag
         port->flip_status.submit_tsc = Libraries::Kernel::sceKernelReadTsc();
         flip_arg = port->flip_status.flip_arg;
     }
+    // Pace the game here, on its own submit thread, as the real library's scan-out would; the
+    // GPU thread then begins the headset frame without waiting.
+    VR::OnHmdFrameAccepted();
     liverpool->SendCommand([=, this]() {
-        Vulkan::Frame* frame = presenter->PrepareHmdFrame(left, right);
+        Vulkan::Frame* frame = presenter->PrepareHmdFrame(left, right, views);
         std::scoped_lock lock{mutex};
         requests.push({
             .frame = frame,
@@ -393,8 +397,10 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
 }
 
 void VideoOutDriver::PresentThread(std::stop_token token) {
-    const std::chrono::nanoseconds vblank_period(1000000000 /
-                                                 EmulatorSettings.GetVblankFrequency());
+    const auto period_of = [](u32 hz) { return std::chrono::nanoseconds(1000000000 / hz); };
+    const u32 base_hz = EmulatorSettings.GetVblankFrequency();
+    u32 current_hz = base_hz;
+    std::chrono::nanoseconds vblank_period = period_of(current_hz);
 
     Common::SetCurrentThreadName("shadPS4:PresentThread");
     Common::SetCurrentThreadRealtime(vblank_period);
@@ -412,6 +418,18 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     };
 
     while (!token.stop_requested()) {
+        // In VR mode the headset panel drives the vblank (120 Hz on a PSVR), not the TV.
+        const u32 hmd_hz = VR::GetHmdVblankHz();
+        const u32 wanted_hz = hmd_hz != 0 && VR::IsReprojectionActive() ? hmd_hz : base_hz;
+        if (wanted_hz != current_hz) {
+            current_hz = wanted_hz;
+            vblank_period = period_of(current_hz);
+            timer = Common::AccurateTimer{vblank_period};
+            Common::SetCurrentThreadRealtime(vblank_period);
+            LOG_INFO(Lib_VideoOut, "Vblank now {} Hz ({})", current_hz,
+                     wanted_hz == base_hz ? "flat" : "VR mode");
+        }
+
         timer.Start();
 
         if (DebugState.IsGuestThreadsPaused()) {

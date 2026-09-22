@@ -528,6 +528,9 @@ struct VRSettings {
     Setting<float> render_scale{1.0f};
     // SDL scancode name of the key that recenters the view.
     Setting<std::string> recenter_key{"Keypad 5"};
+    // Vblank rate while the game is in VR mode, as a PSVR's 120 Hz (or 90 Hz) panel drives it on
+    // a console. 0 keeps the GPU vblank frequency setting.
+    Setting<u32> hmd_refresh_hz{120};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -538,11 +541,12 @@ struct VRSettings {
             make_override<VRSettings>("mirror", &VRSettings::mirror),
             make_override<VRSettings>("render_scale", &VRSettings::render_scale),
             make_override<VRSettings>("recenter_key", &VRSettings::recenter_key),
+            make_override<VRSettings>("hmd_refresh_hz", &VRSettings::hmd_refresh_hz),
         };
     }
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(VRSettings, psvr_enabled, pose_source, eye_source, fov_mode,
-                                   mirror, render_scale, recenter_key)
+                                   mirror, render_scale, recenter_key, hmd_refresh_hz)
 
 // -------------------------------
 // Main manager
@@ -836,6 +840,7 @@ public:
     SETTING_FORWARD(m_vr, VrMirror, mirror)
     SETTING_FORWARD(m_vr, VrRenderScale, render_scale)
     SETTING_FORWARD(m_vr, VrRecenterKey, recenter_key)
+    SETTING_FORWARD(m_vr, VrHmdRefreshHz, hmd_refresh_hz)
 
 #undef SETTING_FORWARD
 #undef SETTING_FORWARD_BOOL

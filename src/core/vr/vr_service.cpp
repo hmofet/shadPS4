@@ -32,13 +32,24 @@ struct State {
     float render_scale = 1.0f;
     SDL_Scancode recenter_key = SDL_SCANCODE_UNKNOWN;
     bool recenter_key_down = false;
+    u32 hmd_refresh_hz = 0;
 
     std::atomic<bool> reprojection_active{false};
 
-    // The pose and FOV the game was last given, reported back with each submitted frame.
+    // The pose and FOV the game was last given, reported back with each submitted frame that
+    // does not say which pose it used.
     TrackingSample render_sample{};
     HmdFov reported_fov{};
     bool fov_reported = false;
+    // Recent head samples given to the game, so a submitted frame's pose can be matched to the
+    // exact eye poses it rendered with. A ring; the game is at most a few frames behind.
+    static constexpr size_t RecentSamples = 32;
+    std::array<TrackingSample, RecentSamples> recent{};
+    size_t recent_next = 0;
+
+    // Game frame rate for the log.
+    u64 rate_window_start_us = 0;
+    u64 rate_window_frames = 0;
 };
 
 State& GetState() {
@@ -60,6 +71,11 @@ void Initialize(State& s) {
     if (!key.empty() && s.recenter_key == SDL_SCANCODE_UNKNOWN) {
         LOG_WARNING(Lib_Hmd, "Unknown VR recenter key '{}'", key);
     }
+    s.hmd_refresh_hz = EmulatorSettings.GetVrHmdRefreshHz();
+    if (s.hmd_refresh_hz != 0 && (s.hmd_refresh_hz < 30 || s.hmd_refresh_hz > 360)) {
+        LOG_WARNING(Lib_Hmd, "VR hmd_refresh_hz {} is out of range, using 120", s.hmd_refresh_hz);
+        s.hmd_refresh_hz = 120;
+    }
 
     const std::string wanted = EmulatorSettings.GetVrPoseSource();
     s.fallback_source = std::make_unique<DeskPoseSource>(wanted != "static");
@@ -80,9 +96,10 @@ void Initialize(State& s) {
     }
 
     LOG_INFO(Lib_Hmd,
-             "PSVR enabled: pose source '{}', eyes '{}', mirror '{}', fov '{}', render scale {}",
+             "PSVR enabled: pose source '{}', eyes '{}', mirror '{}', fov '{}', render scale {}, "
+             "VR mode vblank {} Hz",
              s.source.load()->Name(), s.eye_source == EyeSource::Mono ? "mono" : "sbs", mirror,
-             s.native_fov ? "native" : "psvr", s.render_scale);
+             s.native_fov ? "native" : "psvr", s.render_scale, s.hmd_refresh_hz);
 }
 
 State& Get() {
@@ -152,7 +169,73 @@ bool SampleHead(u64 guest_time_us, bool is_render_pose, TrackingSample& out) {
     }
     std::scoped_lock lk{s.mutex};
     s.render_sample = out;
+    s.recent[s.recent_next] = out;
+    s.recent_next = (s.recent_next + 1) % State::RecentSamples;
     return true;
+}
+
+namespace {
+
+// The FOV reported to the game, as the tangents of each eye's frustum.
+std::array<FovTangents, EyeCount> ReportedEyeFov(State& s) {
+    HmdFov fov;
+    bool reported;
+    {
+        std::scoped_lock lk{s.mutex};
+        fov = s.reported_fov;
+        reported = s.fov_reported;
+    }
+    if (!reported) {
+        fov = GetReportedFov();
+    }
+    return {FovTangents{fov.tan_out, fov.tan_in, fov.tan_top, fov.tan_bottom},
+            FovTangents{fov.tan_in, fov.tan_out, fov.tan_top, fov.tan_bottom}};
+}
+
+} // namespace
+
+HmdFrameViews ResolveRenderViews(const HmdFrameInfo& info) {
+    State& s = Get();
+    TrackingSample sample;
+    bool matched = false;
+    {
+        std::scoped_lock lk{s.mutex};
+        sample = s.render_sample;
+        if (info.have_pose) {
+            for (const TrackingSample& recent : s.recent) {
+                if (recent.valid && SamePose(recent.head, info.head)) {
+                    sample = recent;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (info.have_pose && !matched) {
+        // The game rendered from a pose it made itself (smoothed, or clamped for comfort). Use
+        // it as given, with the eyes on either side of it.
+        const float half_ipd = GetIpd() * 0.5f;
+        sample = {};
+        sample.valid = true;
+        sample.head = info.head;
+        sample.guest_time_us = info.guest_time_us;
+        sample.eyes[EyeLeft] = Compose(info.head, {{}, {-half_ipd, 0.0f, 0.0f}});
+        sample.eyes[EyeRight] = Compose(info.head, {{}, {half_ipd, 0.0f, 0.0f}});
+    }
+    const std::array<FovTangents, EyeCount> reported_fov = ReportedEyeFov(s);
+
+    HmdFrameViews views{};
+    for (u32 eye = 0; eye < EyeCount; eye++) {
+        views[eye].pose = sample.eyes[eye];
+        views[eye].fov = info.have_fov ? info.fov[eye] : reported_fov[eye];
+    }
+    VR_TRACE(Lib_Hmd,
+             "render views: pose {} ({}), fov {} (left eye l={:.3f} r={:.3f} u={:.3f} d={:.3f})",
+             info.have_pose ? "from the game" : "last sample",
+             matched ? "matched a sample" : "unmatched",
+             info.have_fov ? "from the game" : "as reported", views[EyeLeft].fov.left,
+             views[EyeLeft].fov.right, views[EyeLeft].fov.up, views[EyeLeft].fov.down);
+    return views;
 }
 
 void Recenter() {
@@ -181,6 +264,37 @@ void SetReprojectionActive(bool active, std::string_view variant) {
 
 bool IsReprojectionActive() {
     return Get().reprojection_active.load();
+}
+
+u32 GetHmdVblankHz() {
+    if (!IsPsvrEnabled()) {
+        return 0;
+    }
+    return Get().hmd_refresh_hz;
+}
+
+void OnHmdFrameAccepted() {
+    State& s = Get();
+    {
+        // Frame rate to the log every few seconds: the first thing to check when VR feels wrong.
+        constexpr u64 WindowUs = 5'000'000;
+        const u64 now = Libraries::Kernel::sceKernelGetProcessTime();
+        std::scoped_lock lk{s.mutex};
+        s.rate_window_frames++;
+        if (s.rate_window_start_us == 0) {
+            s.rate_window_start_us = now;
+        } else if (now - s.rate_window_start_us >= WindowUs) {
+            const double seconds = static_cast<double>(now - s.rate_window_start_us) * 1e-6;
+            LOG_INFO(Lib_Hmd, "VR: game submits {:.1f} frames/s", s.rate_window_frames / seconds);
+            s.rate_window_start_us = now;
+            s.rate_window_frames = 0;
+        }
+    }
+#ifdef ENABLE_OPENXR
+    if (OpenXrRuntime* xr = GetOpenXr(s)) {
+        xr->WaitFrame();
+    }
+#endif
 }
 
 bool UseOpenXrVulkan() {
@@ -276,12 +390,20 @@ FrameSubmit BeginFrame() {
 #endif
     frame.vr_active = s.reprojection_active.load();
     if (!frame.vr_active) {
+#ifdef ENABLE_OPENXR
+        // The game left VR mode after this frame was accepted (OnHmdFrameAccepted): its wait
+        // must still be paired with a begin, or the next wait never returns.
+        if (xr) {
+            xr->DiscardPendingFrame();
+        }
+#endif
         return frame;
     }
     frame.eye_source = s.eye_source;
     frame.mirror = s.mirror;
 #ifdef ENABLE_OPENXR
-    if (xr && xr->IsSessionRunning()) {
+    if (xr) {
+        // BeginFrame consumes the pending wait even when the session has stopped meanwhile.
         bool should_render = false;
         if (xr->BeginFrame(frame.targets, should_render)) {
             frame.xr_frame = true;
@@ -292,7 +414,7 @@ FrameSubmit BeginFrame() {
     return frame;
 }
 
-void EndFrame(const FrameSubmit& frame, bool rendered) {
+void EndFrame(const FrameSubmit& frame, bool rendered, const HmdFrameViews* views) {
     if (!frame.xr_frame) {
         return;
     }
@@ -302,21 +424,23 @@ void EndFrame(const FrameSubmit& frame, bool rendered) {
     if (!xr) {
         return;
     }
+    if (views != nullptr) {
+        xr->EndFrame(rendered && frame.xr_render, *views);
+        return;
+    }
+    // No pose came with the frame (the flipped frame is being split): the last one given to the
+    // game is the best guess.
     TrackingSample sample;
-    HmdFov fov;
     {
         std::scoped_lock lk{s.mutex};
         sample = s.render_sample;
-        fov = s.fov_reported ? s.reported_fov : HmdFov{};
     }
-    if (!s.fov_reported) {
-        fov = GetReportedFov();
+    const std::array<FovTangents, EyeCount> fov = ReportedEyeFov(s);
+    HmdFrameViews last{};
+    for (u32 eye = 0; eye < EyeCount; eye++) {
+        last[eye] = {sample.eyes[eye], fov[eye]};
     }
-    std::array<EyeView, EyeCount> views{};
-    views[EyeLeft] = {sample.eyes[EyeLeft], {fov.tan_out, fov.tan_in, fov.tan_top, fov.tan_bottom}};
-    views[EyeRight] = {sample.eyes[EyeRight],
-                       {fov.tan_in, fov.tan_out, fov.tan_top, fov.tan_bottom}};
-    xr->EndFrame(rendered && frame.xr_render && sample.valid, views);
+    xr->EndFrame(rendered && frame.xr_render && sample.valid, last);
 #endif
 }
 

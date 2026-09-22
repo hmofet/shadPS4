@@ -681,8 +681,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     const auto image_id = texture_cache.FindImage(desc);
     texture_cache.UpdateImage(image_id);
 
-    // In VR mode, wait for the headset's next frame and get its eye images. No-op otherwise.
-    const VR::FrameSubmit vr_frame = VR::BeginFrame();
+    // In VR mode, wait for the headset's next frame and get its eye images. No-op otherwise,
+    // and when the game is handing its eye textures to reprojection instead (PrepareHmdFrame),
+    // which then owns the headset frames: beginning one here would show a black frame.
+    const bool hmd_frames = ReceivingHmdFrames();
+    const VR::FrameSubmit vr_frame = hmd_frames ? VR::FrameSubmit{} : VR::BeginFrame();
 
     Frame* frame = GetRenderFrame();
 
@@ -741,11 +744,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                             readback);
     }
 
-    // In VR mode, cut the eye images out of the frame for the headset, unless the game is
-    // handing its eye textures to reprojection (PrepareHmdFrame), which takes precedence.
+    // In VR mode, cut the eye images out of the frame for the headset.
     HostPasses::VrPass::Output vr_output{};
     bool vr_rendered = false;
-    if (vr_frame.vr_active && !ReceivingHmdFrames()) {
+    if (vr_frame.vr_active) {
         const vk::Format format = image.info.pixel_format;
         if (instance.IsFormatSupported(format, vk::FormatFeatureFlagBits2::eBlitSrc)) {
             image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
@@ -829,7 +831,8 @@ bool Presenter::ReceivingHmdFrames() const {
            now - last < std::chrono::nanoseconds(std::chrono::milliseconds(250)).count();
 }
 
-Frame* Presenter::PrepareHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image& right) {
+Frame* Presenter::PrepareHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image& right,
+                                  const VR::HmdFrameViews& views) {
     last_hmd_frame_ns.store(std::chrono::steady_clock::now().time_since_epoch().count(),
                             std::memory_order_relaxed);
 
@@ -958,7 +961,7 @@ Frame* Presenter::PrepareHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image
 
     if (vr_frame.xr_frame) {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        VR::EndFrame(vr_frame, vr_rendered);
+        VR::EndFrame(vr_frame, vr_rendered, &views);
     }
     return frame;
 }

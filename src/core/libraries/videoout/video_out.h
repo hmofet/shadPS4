@@ -6,6 +6,7 @@
 #include <core/libraries/system/userservice.h>
 #include "core/libraries/kernel/equeue.h"
 #include "core/libraries/videoout/buffer.h"
+#include "core/vr/vr_types.h"
 
 namespace AmdGpu {
 struct Image;
@@ -145,9 +146,11 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
 // Internal system functions
 s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, void** unk);
 
-// Presents a frame libSceHmdReprojection was given (one texture descriptor per eye) as a flip of
-// the main port. Returns false when the frame was dropped.
-bool SubmitHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image& right);
+// Presents a frame libSceHmdReprojection was given (one texture descriptor per eye, and the
+// poses and FOV it was rendered with) as a flip of the main port. Returns false when the frame
+// was dropped.
+bool SubmitHmdFrame(const AmdGpu::Image& left, const AmdGpu::Image& right,
+                    const VR::HmdFrameViews& views);
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym);
 

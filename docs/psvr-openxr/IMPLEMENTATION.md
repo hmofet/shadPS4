@@ -34,8 +34,9 @@ once when the game starts.
 | `eye_source` | `sbs`, `mono` | Left/right halves of the flipped frame to the two eyes, or the whole frame to both |
 | `fov_mode` | `native`, `psvr` | FOV reported by `sceHmdGetFieldOfView`: the real headset's, or the original PSVR values |
 | `mirror` | `full`, `left`, `right` | What the desktop window shows while the game is in VR mode |
-| `render_scale` | 0.5 to 4.0 | Multiplier on the 1920x1080 panel size reported to the game |
+| `render_scale` | 0.5 to 4.0 | Multiplier on the 1920x1080 panel size reported to the game. WipEout sizes each eye at 1.4x half the panel, so 1.4 gives eye textures the size of a Quest 3 view |
 | `recenter_key` | SDL scancode name | Recenters the view |
+| `hmd_refresh_hz` | 120 (default), 90, or 0 | Vblank rate while the game is in VR mode, as the PSVR panel drives it on a console; 0 keeps the GPU vblank frequency setting |
 
 Desk mode keys (numpad): 4/6 yaw, 8/2 pitch, 7/9 roll, 1/3 strafe, +/- forward and back.
 
@@ -136,10 +137,10 @@ Observed problems, with the likely causes to check first:
 
 | Problem | Likely causes |
 |---|---|
-| Very uncomfortable to play | (1) **Pose mismatch.** Each projection layer is submitted with the latest head pose handed to the game, not the pose that frame was rendered with. The eye frame reaches the runtime at least one frame after rendering, so the runtime reprojects from the wrong place and the world swims. `sceHmdReprojectionStart`'s second argument appears to carry the render pose (its dump shows the head position); correlate the layer pose with it or with `user_frame_number`. (2) **About 30 fps** eye frames on a 72 or 90 Hz headset, with the frame loop paced by our emulated vblank flips. (3) **FOV and eye mapping unverified.** The layer FOV is the one reported to the game (the PSVR fallback values when the game asks before the session is running), and the tan_out and tan_in assignment per eye is untested; a swap would break stereo convergence. (4) The 1.5 m camera offset and the game's own reprojection expectations are unverified |
-| Menus look unstable | Most likely the same pose mismatch: head-locked or world-locked UI swims when the layer pose lags the render pose |
-| Very low resolution and blocky in races | The game renders 1344x1512 per eye (base PS4 PSVR size), stretched to the Quest's 1872x2016, and may lower its resolution further in races. To try: PS4 Pro (neo) mode, which PSVR titles often use for larger eye targets; `render_scale` (the reported panel size, which the game may ignore); emulator-side resolution scaling of the eye render targets |
-| No sound in the headset session | Sound played in the earlier desk-mode runs (through the Link audio device, the Windows default), but not with the OpenXR session active. Unexplained. Check which audio device is default once Link starts the app, whether the Meta runtime switches audio, and the persistent `Audio3d ... queue.size() >= max_entries` errors, which appear in every run and suggest the 3D audio queue is not being drained |
+| Very uncomfortable to play | (1) **Pose mismatch.** Each projection layer was submitted with the latest head pose handed to the game, not the pose that frame was rendered with. Fixed: see "Review and fixes" below. (2) **About 30 fps**: the game was paced to exactly half the 60 Hz vblank. Fixed by running the vblank at the PSVR panel rate in VR mode. (3) **FOV and eye mapping**: now verified from the projection the game passes with each frame, and taken from there |
+| Menus look unstable | The same pose mismatch |
+| Very low resolution and blocky in races | The game renders 1344x1512 per eye, which is 1.4x half the reported 1920x1080 panel, so `render_scale` controls it: 1.4 gives 1882x2117 eyes, about the Quest 3's 1872x2016 |
+| No sound in the headset session | Sound played in the earlier desk-mode runs (through the Link audio device, the Windows default), but not with the OpenXR session active. Unexplained; see the checks in "Review and fixes" |
 | Quest Touch controllers do nothing | Not implemented: mapping OpenXR controller actions onto the PS4 pad is the plan's input step (PR 5) |
 
 Operational notes:
@@ -154,18 +155,32 @@ Operational notes:
 ## Frame path as built
 
 ```
-flip ─▶ Presenter::PrepareFrame
-          VR::BeginFrame      xrWaitFrame + xrBeginFrame + acquire eye images (VR mode only)
-          VrPass::Render      blit each eye out of the flipped frame into an intermediate
-                              image, copy it into the eye's swapchain image
-          draw_scheduler.Flush
-          VR::EndFrame        release images + xrEndFrame, under the queue submit lock
+game render thread
+  sceHmdReprojectionStart(a0, a1)
+      read the eye T#s, the per-eye projection (a0) and the render pose (a1)
+      VR::ResolveRenderViews   match the pose to the tracker sample it came from -> eye poses
+      VideoOut::SubmitHmdFlip  accept or drop (host more than 2 frames behind)
+      VR::OnHmdFrameAccepted   frame-rate log; xrWaitFrame (paces the game thread, not the GPU)
+      liverpool->SendCommand(PrepareHmdFrame)
+
+GPU thread
+  Presenter::PrepareHmdFrame
+      VR::BeginFrame           takes the waited frame state; xrBeginFrame + acquire eye images
+      VrPass::Render           blit each eye's array layer into an intermediate image, copy it
+                               into the eye's swapchain image
+      draw_scheduler.Flush
+      VR::EndFrame(views)      release images + xrEndFrame with the frame's own poses and FOV,
+                               under the queue submit lock
+
+present thread (vblank, 120 Hz in VR mode)
+  Flip                         present the mirror, raise the flip event
+  SignalReprojectionFlip       flip event on vblanks with no new frame
 ```
 
 "VR mode" starts with any `sceHmdReprojectionStart*` call and ends with `Stop` or `Finalize`.
-While it lasts, `sceHmdReprojectionStart` sends the frame's eye textures to
-`Presenter::PrepareHmdFrame` through the GPU thread (after the game's rendering), which blits each
-eye's array layer into the headset and draws one eye in the window.
+Games that do not go through `Start` (or whose `Start` layout is not decoded) still get the
+flipped frame split into two eyes in `Presenter::PrepareFrame`; there `BeginFrame` does its own
+`xrWaitFrame` and the layer pose is the last one the tracker gave the game.
 
 The intermediate copy exists because the guest image is already display encoded. Blitting into
 an sRGB swapchain image would encode it twice; blitting into an intermediate of the same encoding
@@ -187,6 +202,78 @@ and then copying the bits across keeps it exact.
 - **Unknown layouts left untouched.** `sceHmdGetInertialSensorData` and `sceHmdGetAssyError`
   return OK without writing, and the flip-to-display latencies are zero, until traces show what
   games read from them.
+
+## Review and fixes (2026-09-22)
+
+A review of the branch against the headset test found the causes of the comfort and frame-rate
+problems in the code and in the M0 trace, and fixed them ahead of the next headset session.
+
+### What the trace showed
+
+**`sceHmdReprojectionStart` carries the render pose and projection.** Its second argument is
+the head pose the frame was rendered with, in PSVR camera space: position xyz, orientation xyzw,
+then a u64 timestamp at +0x20. In the trace it equals the pose `sceVrTrackerGetResult` had just
+returned (including the 1.5 m camera offset). The first argument holds, at +0x18 and +0x28, one
+quadruple per eye: `1/(tan_l+tan_r)`, `1/(tan_u+tan_d)`, `tan_l/(tan_l+tan_r)`,
+`tan_u/(tan_u+tan_d)`, which is the projection scale and centre a game derives from
+`sceHmdGetFieldOfView`. With the Quest 3 FOV reported (out 1.3764, in 0.8391, top 0.9657, bottom
+1.4281) the left eye's quadruple was (0.4514, 0.4178, 0.6213, 0.4034) and the right eye's centre x
+was 0.3787, which match exactly. So WipEout renders with the asymmetric native FOV, including the
+vertical asymmetry, and the layer FOV was already the right one.
+
+**The layer pose was wrong.** `EndFrame` submitted `render_sample`, the latest HMD sample given
+to the game, which the render thread overwrites for the next frame before the GPU thread ends
+the current one. The runtime therefore reprojected each frame from a pose about a frame ahead of
+the one it was rendered with, in the direction of head motion: the world swims and the menus
+wobble. Now the pose from `Start` is matched against the last 32 samples given to the game
+(`VR::ResolveRenderViews`), so the layer gets the exact eye poses the game rendered from, and the
+FOV from the `Start` projection. Decoding lives in `core/vr/hmd_frame.h` (unit tested); a layout
+that does not decode falls back to the previous behaviour with a one-time warning.
+
+**The game ran at exactly 30.0 fps.** `sceVrTrackerGetResult` was called at 30.0 Hz over every
+20 s window of the log while the emulated vblank ran at 60 Hz, which is pacing, not load: the
+game waits two flips per frame because a PSVR panel is scanned out at 120 Hz. The present
+thread now runs the vblank at `hmd_refresh_hz` (120) while VR mode is active and returns to the
+configured rate when it ends. Present mode Mailbox keeps the desktop mirror from throttling it.
+The game's submit rate is logged every 5 s (`VR: game submits N frames/s`).
+
+**`xrWaitFrame` blocked the GPU thread.** `BeginFrame` waited for the runtime's next frame slot
+on the GPU command processor thread, delaying the game's next frame by up to a headset frame.
+The wait now happens in `OnHmdFrameAccepted` on the game's render thread, right after the frame
+is accepted, which is where the real library's scan-out would have blocked; the GPU thread then
+begins the frame with the recorded frame state. The OpenXR spec allows this: `xrWaitFrame` may
+be called from any thread and blocks only until the previous frame's `xrBeginFrame`.
+
+**A flip during VR mode showed a black headset frame.** `PrepareFrame` began an OpenXR frame
+for every flip even while `PrepareHmdFrame` was providing them, and ended it with no layers. It
+now leaves the headset alone while `Start` frames are arriving.
+
+**Eye resolution follows the reported panel size.** 1344x1512 is 1.4x half of 1920x1080, so
+`render_scale` sizes the game's eye targets; 1.4 matches the Quest 3 and costs the same GPU time
+as any 1.4x panel.
+
+### Not fixed yet
+
+- **Sound in the headset.** Checks for the next session, in order: the Windows volume mixer
+  while the game runs (is shadps4 on the Oculus Virtual Audio Device, and is it producing
+  level?); the Oculus app's "Audio output in VR" and "Hear VR audio from computer" settings;
+  then whether SDL's default-device stream followed a default change made by Link. The
+  `Audio3d ... queue.size() >= max_entries` errors also appear in runs with sound and are not
+  the cause.
+- **Quest Touch controllers.** OpenXR action sets mapped onto the DualShock 4 (PR 5). Until
+  then a PC gamepad works.
+- **Frame rate under 60.** If the log still shows well under 60 frames/s with the 120 Hz vblank,
+  the next candidates are the eye-texture readback path (`Readback Linear Images`) and the game's
+  own GPU cost at the chosen `render_scale`.
+
+### Next headset session
+
+1. Per-game config: keep `psvr_enabled` and add `"render_scale": 1.4`; leave `hmd_refresh_hz`
+   at its default.
+2. Watch the log for `Vblank now 120 Hz (VR mode)`, `VR: game submits ... frames/s` (expect
+   about 60), and the first `render views: pose from the game (matched a sample), fov from the
+   game` trace line.
+3. Comfort check: look around in the menus and during a race. The world should stay put.
 
 ## Coordinate mapping
 

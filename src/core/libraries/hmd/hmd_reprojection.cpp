@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
 #include <string>
 #include "common/logging/log.h"
 #include "core/libraries/error_codes.h"
@@ -10,6 +11,7 @@
 #include "core/libraries/libs.h"
 #include "core/libraries/videoout/video_out.h"
 #include "core/memory.h"
+#include "core/vr/hmd_frame.h"
 #include "core/vr/vr_service.h"
 #include "video_core/amdgpu/resource.h"
 
@@ -84,12 +86,48 @@ bool ReadTextureSharp(u64 address, AmdGpu::Image& out) {
     return out.Valid();
 }
 
+// What the game rendered the frame with, from the Start parameters (layout in hmd_frame.h). Parts
+// that do not decode are left for the service to fill from the tracker's last sample.
+VR::HmdFrameInfo ReadFrameInfo(u64 param, u64 pose_param) {
+    VR::HmdFrameInfo info{};
+    static bool warned_fov = false;
+    static bool warned_pose = false;
+
+    if (IsReadable(param, VR::StartProjectionOffset + 2 * sizeof(VR::StartEyeProjection))) {
+        std::array<VR::StartEyeProjection, VR::EyeCount> projections{};
+        std::memcpy(projections.data(),
+                    reinterpret_cast<const void*>(param + VR::StartProjectionOffset),
+                    sizeof(projections));
+        info.have_fov = VR::ProjectionToFov(projections[VR::EyeLeft], info.fov[VR::EyeLeft]) &&
+                        VR::ProjectionToFov(projections[VR::EyeRight], info.fov[VR::EyeRight]);
+    }
+    if (!info.have_fov && !warned_fov) {
+        LOG_WARNING(Lib_Hmd, "sceHmdReprojectionStart: eye projections not recognised, using "
+                             "the FOV reported to the game");
+        warned_fov = true;
+    }
+
+    if (IsReadable(pose_param, sizeof(VR::StartRenderPose))) {
+        VR::StartRenderPose pose{};
+        std::memcpy(&pose, reinterpret_cast<const void*>(pose_param), sizeof(pose));
+        info.have_pose =
+            VR::DecodeRenderPose(pose, VR::CameraDistance, info.head, info.guest_time_us);
+    }
+    if (!info.have_pose && !warned_pose) {
+        LOG_WARNING(Lib_Hmd, "sceHmdReprojectionStart: render pose not recognised, using the "
+                             "last pose given to the game");
+        warned_pose = true;
+    }
+    return info;
+}
+
 // sceHmdReprojectionStart's first argument starts with pointers to the left and right eye
 // texture descriptors (T#), 32 bytes each. Observed in WipEout Omega Collection: both point into
 // one 2D array texture (1344x1512 RGBA8 sRGB), base_array 0 for the left eye and 1 for the
-// right, alternating between two such textures from frame to frame.
-void SubmitEyeTextures(u64 param) {
-    if (!IsReadable(param, 2 * sizeof(u64))) {
+// right, alternating between two such textures from frame to frame. The second argument is the
+// head pose the frame was rendered with.
+void SubmitEyeTextures(u64 param, u64 pose_param) {
+    if (!IsReadable(param, VR::StartEyePointersSize)) {
         return;
     }
     const auto* eye_pointers = reinterpret_cast<const u64*>(param);
@@ -103,10 +141,15 @@ void SubmitEyeTextures(u64 param) {
         }
         return;
     }
-    VR_TRACE(Lib_Hmd, "  eyes: {:#x} {}x{} layer {} / {:#x} layer {}", left.Address(),
-             left.width + 1, left.height + 1, static_cast<u32>(left.base_array), right.Address(),
-             static_cast<u32>(right.base_array));
-    Libraries::VideoOut::SubmitHmdFrame(left, right);
+    const VR::HmdFrameInfo info = ReadFrameInfo(param, pose_param);
+    VR_TRACE(Lib_Hmd,
+             "  eyes: {:#x} {}x{} layer {} / {:#x} layer {}; pose {} ({:.3f},{:.3f},{:.3f}) "
+             "t={}; fov {}",
+             left.Address(), left.width + 1, left.height + 1, static_cast<u32>(left.base_array),
+             right.Address(), static_cast<u32>(right.base_array), info.have_pose ? "ok" : "none",
+             info.head.position.x, info.head.position.y, info.head.position.z, info.guest_time_us,
+             info.have_fov ? "ok" : "none");
+    Libraries::VideoOut::SubmitHmdFrame(left, right, VR::ResolveRenderViews(info));
 }
 
 s32 Stop(const char* name, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5) {
@@ -227,7 +270,7 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStart(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4,
     // Called once per frame with that frame's eye textures.
     const s32 result = StartVariant("sceHmdReprojectionStart", a0, a1, a2, a3, a4, a5);
     if (VR::IsPsvrEnabled()) {
-        SubmitEyeTextures(a0);
+        SubmitEyeTextures(a0, a1);
     }
     return result;
 }

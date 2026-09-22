@@ -715,6 +715,7 @@ set(VR_LIBS  src/core/libraries/hmd/hmd.cpp
              src/core/libraries/vr_tracker/vr_tracker.cpp
              src/core/libraries/vr_tracker/vr_tracker.h
              src/core/vr/desk_pose_source.cpp
+             src/core/vr/hmd_frame.h
              src/core/vr/openxr_runtime.h
              src/core/vr/pose_source.h
              src/core/vr/vr_service.cpp

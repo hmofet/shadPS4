@@ -121,6 +121,7 @@ private:
     const std::vector<std::string> vrEyeSourceOptions = {"sbs", "mono"};
     const std::vector<std::string> vrFovModeOptions = {"native", "psvr"};
     const std::vector<std::string> vrMirrorOptions = {"full", "left", "right"};
+    const std::vector<std::string> vrHmdRefreshOptions = {"120", "90", "0"};
     // Windows static guest red-zone protection
     const std::vector<std::string> windowsGuestRedZoneProtectionModeOptions = {"Disabled",
                                                                                "Static Patching"};
@@ -180,6 +181,7 @@ private:
     int vrFovModeSetting;
     int vrMirrorSetting;
     float vrRenderScaleSetting;
+    int vrHmdRefreshSetting;
 };
 
 } // namespace ImGuiEmuSettings

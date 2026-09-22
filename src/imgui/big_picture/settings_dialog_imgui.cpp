@@ -105,6 +105,8 @@ void SettingsWindow::LoadSettings(std::string profile) {
         vrFovModeSetting = GetComboIndex(EmulatorSettings.GetVrFovMode(), vrFovModeOptions);
         vrMirrorSetting = GetComboIndex(EmulatorSettings.GetVrMirror(), vrMirrorOptions);
         vrRenderScaleSetting = EmulatorSettings.GetVrRenderScale();
+        vrHmdRefreshSetting = GetComboIndex(std::to_string(EmulatorSettings.GetVrHmdRefreshHz()),
+                                            vrHmdRefreshOptions);
     }
 }
 
@@ -171,6 +173,8 @@ void SettingsWindow::SaveSettings(std::string profile) {
         EmulatorSettings.SetVrFovMode(vrFovModeOptions.at(vrFovModeSetting), true);
         EmulatorSettings.SetVrMirror(vrMirrorOptions.at(vrMirrorSetting), true);
         EmulatorSettings.SetVrRenderScale(vrRenderScaleSetting, true);
+        EmulatorSettings.SetVrHmdRefreshHz(
+            static_cast<u32>(std::stoi(vrHmdRefreshOptions.at(vrHmdRefreshSetting))), true);
     }
 
     isSpecific ? EmulatorSettings.Save(profile) : EmulatorSettings.Save();
@@ -805,6 +809,8 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
                 AddSettingCombo("VR Field of View", vrFovModeSetting, vrFovModeOptions);
                 AddSettingCombo("VR Desktop Mirror", vrMirrorSetting, vrMirrorOptions);
                 AddSettingSliderFloat("VR Render Scale", vrRenderScaleSetting, 1, 2, 2);
+                AddSettingCombo("VR Vblank Rate In VR Mode (Hz)", vrHmdRefreshSetting,
+                                vrHmdRefreshOptions);
             }
 
             ImGui::EndTable();

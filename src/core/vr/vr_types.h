@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <cmath>
 #include "common/types.h"
 
@@ -42,6 +43,14 @@ enum Eye : u32 {
     EyeRight = 1,
     EyeCount = 2,
 };
+
+// What the renderer used for one eye: submitted back to the runtime with the image so it can
+// reproject from the right place.
+struct EyeView {
+    Pose pose{};
+    FovTangents fov{};
+};
+using HmdFrameViews = std::array<EyeView, EyeCount>;
 
 struct TrackingSample {
     bool valid = false;
