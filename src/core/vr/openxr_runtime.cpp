@@ -5,9 +5,11 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <initializer_list>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -140,6 +142,20 @@ struct OpenXrRuntime::Impl {
     bool have_fov = false;
     float ipd = PsvrIpd;
 
+    // Controller input: one action set, actions with a subaction path per hand.
+    XrActionSet action_set = XR_NULL_HANDLE;
+    XrAction action_stick = XR_NULL_HANDLE;
+    XrAction action_trigger = XR_NULL_HANDLE;
+    XrAction action_squeeze = XR_NULL_HANDLE;
+    XrAction action_primary = XR_NULL_HANDLE;
+    XrAction action_secondary = XR_NULL_HANDLE;
+    XrAction action_stick_click = XR_NULL_HANDLE;
+    XrAction action_menu = XR_NULL_HANDLE;
+    XrAction action_grip = XR_NULL_HANDLE;
+    std::array<XrPath, HandCount> hand_paths{};
+    std::array<XrSpace, HandCount> grip_spaces{};
+    bool actions_attached = false;
+
     PFN_xrGetVulkanGraphicsRequirements2KHR get_graphics_requirements = nullptr;
     PFN_xrCreateVulkanInstanceKHR create_vulkan_instance = nullptr;
     PFN_xrGetVulkanGraphicsDevice2KHR get_vulkan_device = nullptr;
@@ -203,6 +219,189 @@ struct OpenXrRuntime::Impl {
         out = frame_state.predictedDisplayTime +
               (static_cast<s64>(guest_us) - static_cast<s64>(guest_time_at_wait)) * 1000;
         return out > 0;
+    }
+
+    XrPath Path(const char* path) const {
+        XrPath out = XR_NULL_PATH;
+        xrStringToPath(instance, path, &out);
+        return out;
+    }
+
+    bool CreateAction(const char* name, XrActionType type, XrAction& out) {
+        XrActionCreateInfo info{
+            .type = XR_TYPE_ACTION_CREATE_INFO,
+            .actionType = type,
+            .countSubactionPaths = HandCount,
+            .subactionPaths = hand_paths.data(),
+        };
+        std::strncpy(info.actionName, name, XR_MAX_ACTION_NAME_SIZE - 1);
+        std::strncpy(info.localizedActionName, name, XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+        return Check(xrCreateAction(action_set, &info, &out), name);
+    }
+
+    // Suggests bindings for one interaction profile. Runtimes reject profiles they do not know
+    // (XR_ERROR_PATH_UNSUPPORTED); that is fine, the others still apply.
+    void SuggestBindings(const char* profile,
+                         std::initializer_list<std::pair<XrAction, const char*>> bindings) {
+        std::vector<XrActionSuggestedBinding> suggested;
+        for (const auto& [action, path] : bindings) {
+            suggested.push_back({action, Path(path)});
+        }
+        const XrInteractionProfileSuggestedBinding info{
+            .type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING,
+            .interactionProfile = Path(profile),
+            .countSuggestedBindings = static_cast<u32>(suggested.size()),
+            .suggestedBindings = suggested.data(),
+        };
+        const XrResult result = xrSuggestInteractionProfileBindings(instance, &info);
+        if (XR_FAILED(result)) {
+            LOG_INFO(Lib_Hmd, "OpenXR: no bindings for {} ({})", profile, static_cast<s32>(result));
+        }
+    }
+
+    // The DualShock 4 mapping: sticks, triggers (R2/L2), grips (R1/L1), A/B/X/Y as
+    // Cross/Circle/Square/Triangle, stick clicks (L3/R3) and menu (Options).
+    bool CreateActions() {
+        hand_paths = {Path("/user/hand/left"), Path("/user/hand/right")};
+        XrActionSetCreateInfo set_info{.type = XR_TYPE_ACTION_SET_CREATE_INFO, .priority = 0};
+        std::strncpy(set_info.actionSetName, "psvr_pad", XR_MAX_ACTION_SET_NAME_SIZE - 1);
+        std::strncpy(set_info.localizedActionSetName, "PSVR pad",
+                     XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE - 1);
+        if (!Check(xrCreateActionSet(instance, &set_info, &action_set), "xrCreateActionSet")) {
+            return false;
+        }
+        if (!CreateAction("stick", XR_ACTION_TYPE_VECTOR2F_INPUT, action_stick) ||
+            !CreateAction("trigger", XR_ACTION_TYPE_FLOAT_INPUT, action_trigger) ||
+            !CreateAction("squeeze", XR_ACTION_TYPE_FLOAT_INPUT, action_squeeze) ||
+            !CreateAction("primary", XR_ACTION_TYPE_BOOLEAN_INPUT, action_primary) ||
+            !CreateAction("secondary", XR_ACTION_TYPE_BOOLEAN_INPUT, action_secondary) ||
+            !CreateAction("stick_click", XR_ACTION_TYPE_BOOLEAN_INPUT, action_stick_click) ||
+            !CreateAction("menu", XR_ACTION_TYPE_BOOLEAN_INPUT, action_menu) ||
+            !CreateAction("grip", XR_ACTION_TYPE_POSE_INPUT, action_grip)) {
+            return false;
+        }
+
+        SuggestBindings("/interaction_profiles/oculus/touch_controller",
+                        {{action_stick, "/user/hand/left/input/thumbstick"},
+                         {action_stick, "/user/hand/right/input/thumbstick"},
+                         {action_trigger, "/user/hand/left/input/trigger/value"},
+                         {action_trigger, "/user/hand/right/input/trigger/value"},
+                         {action_squeeze, "/user/hand/left/input/squeeze/value"},
+                         {action_squeeze, "/user/hand/right/input/squeeze/value"},
+                         {action_primary, "/user/hand/left/input/x/click"},
+                         {action_primary, "/user/hand/right/input/a/click"},
+                         {action_secondary, "/user/hand/left/input/y/click"},
+                         {action_secondary, "/user/hand/right/input/b/click"},
+                         {action_stick_click, "/user/hand/left/input/thumbstick/click"},
+                         {action_stick_click, "/user/hand/right/input/thumbstick/click"},
+                         {action_menu, "/user/hand/left/input/menu/click"},
+                         {action_grip, "/user/hand/left/input/grip/pose"},
+                         {action_grip, "/user/hand/right/input/grip/pose"}});
+        SuggestBindings("/interaction_profiles/valve/index_controller",
+                        {{action_stick, "/user/hand/left/input/thumbstick"},
+                         {action_stick, "/user/hand/right/input/thumbstick"},
+                         {action_trigger, "/user/hand/left/input/trigger/value"},
+                         {action_trigger, "/user/hand/right/input/trigger/value"},
+                         {action_squeeze, "/user/hand/left/input/squeeze/value"},
+                         {action_squeeze, "/user/hand/right/input/squeeze/value"},
+                         {action_primary, "/user/hand/left/input/a/click"},
+                         {action_primary, "/user/hand/right/input/a/click"},
+                         {action_secondary, "/user/hand/left/input/b/click"},
+                         {action_secondary, "/user/hand/right/input/b/click"},
+                         {action_stick_click, "/user/hand/left/input/thumbstick/click"},
+                         {action_stick_click, "/user/hand/right/input/thumbstick/click"},
+                         {action_grip, "/user/hand/left/input/grip/pose"},
+                         {action_grip, "/user/hand/right/input/grip/pose"}});
+        SuggestBindings("/interaction_profiles/htc/vive_controller",
+                        {{action_stick, "/user/hand/left/input/trackpad"},
+                         {action_stick, "/user/hand/right/input/trackpad"},
+                         {action_trigger, "/user/hand/left/input/trigger/value"},
+                         {action_trigger, "/user/hand/right/input/trigger/value"},
+                         {action_squeeze, "/user/hand/left/input/squeeze/click"},
+                         {action_squeeze, "/user/hand/right/input/squeeze/click"},
+                         {action_primary, "/user/hand/left/input/trackpad/click"},
+                         {action_primary, "/user/hand/right/input/trackpad/click"},
+                         {action_menu, "/user/hand/left/input/menu/click"},
+                         {action_secondary, "/user/hand/right/input/menu/click"},
+                         {action_grip, "/user/hand/left/input/grip/pose"},
+                         {action_grip, "/user/hand/right/input/grip/pose"}});
+        SuggestBindings("/interaction_profiles/microsoft/motion_controller",
+                        {{action_stick, "/user/hand/left/input/thumbstick"},
+                         {action_stick, "/user/hand/right/input/thumbstick"},
+                         {action_trigger, "/user/hand/left/input/trigger/value"},
+                         {action_trigger, "/user/hand/right/input/trigger/value"},
+                         {action_squeeze, "/user/hand/left/input/squeeze/click"},
+                         {action_squeeze, "/user/hand/right/input/squeeze/click"},
+                         {action_primary, "/user/hand/left/input/trackpad/click"},
+                         {action_primary, "/user/hand/right/input/trackpad/click"},
+                         {action_stick_click, "/user/hand/left/input/thumbstick/click"},
+                         {action_stick_click, "/user/hand/right/input/thumbstick/click"},
+                         {action_menu, "/user/hand/left/input/menu/click"},
+                         {action_grip, "/user/hand/left/input/grip/pose"},
+                         {action_grip, "/user/hand/right/input/grip/pose"}});
+        SuggestBindings("/interaction_profiles/khr/simple_controller",
+                        {{action_trigger, "/user/hand/left/input/select/click"},
+                         {action_trigger, "/user/hand/right/input/select/click"},
+                         {action_menu, "/user/hand/left/input/menu/click"},
+                         {action_secondary, "/user/hand/right/input/menu/click"},
+                         {action_grip, "/user/hand/left/input/grip/pose"},
+                         {action_grip, "/user/hand/right/input/grip/pose"}});
+
+        for (u32 hand = 0; hand < HandCount; hand++) {
+            const XrActionSpaceCreateInfo space_info{
+                .type = XR_TYPE_ACTION_SPACE_CREATE_INFO,
+                .action = action_grip,
+                .subactionPath = hand_paths[hand],
+                .poseInActionSpace = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}},
+            };
+            if (!Check(xrCreateActionSpace(session, &space_info, &grip_spaces[hand]),
+                       "xrCreateActionSpace")) {
+                return false;
+            }
+        }
+        const XrSessionActionSetsAttachInfo attach{
+            .type = XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO,
+            .countActionSets = 1,
+            .actionSets = &action_set,
+        };
+        actions_attached =
+            Check(xrAttachSessionActionSets(session, &attach), "xrAttachSessionActionSets");
+        return actions_attached;
+    }
+
+    void DestroyActions() {
+        for (XrSpace& space : grip_spaces) {
+            if (space != XR_NULL_HANDLE) {
+                xrDestroySpace(space);
+                space = XR_NULL_HANDLE;
+            }
+        }
+        if (action_set != XR_NULL_HANDLE) {
+            // Destroying the set destroys its actions.
+            xrDestroyActionSet(action_set);
+            action_set = XR_NULL_HANDLE;
+        }
+        action_stick = action_trigger = action_squeeze = action_primary = action_secondary =
+            action_stick_click = action_menu = action_grip = XR_NULL_HANDLE;
+        actions_attached = false;
+    }
+
+    bool GetBool(XrAction action, XrPath hand) const {
+        const XrActionStateGetInfo info{
+            .type = XR_TYPE_ACTION_STATE_GET_INFO, .action = action, .subactionPath = hand};
+        XrActionStateBoolean state{XR_TYPE_ACTION_STATE_BOOLEAN};
+        return XR_SUCCEEDED(xrGetActionStateBoolean(session, &info, &state)) && state.isActive &&
+               state.currentState;
+    }
+
+    float GetFloat(XrAction action, XrPath hand) const {
+        const XrActionStateGetInfo info{
+            .type = XR_TYPE_ACTION_STATE_GET_INFO, .action = action, .subactionPath = hand};
+        XrActionStateFloat state{XR_TYPE_ACTION_STATE_FLOAT};
+        if (XR_FAILED(xrGetActionStateFloat(session, &info, &state)) || !state.isActive) {
+            return 0.0f;
+        }
+        return state.currentState;
     }
 
     bool CreateSwapchains() {
@@ -532,6 +731,11 @@ bool OpenXrRuntime::CreateSession(VkInstance instance, VkPhysicalDevice physical
     LOG_INFO(Lib_Hmd, "OpenXR: session created, recommended eye size {}x{}",
              d.config_views[0].recommendedImageRectWidth,
              d.config_views[0].recommendedImageRectHeight);
+    if (!d.CreateActions()) {
+        // Input is optional: the PC gamepad still works.
+        LOG_WARNING(Lib_Hmd, "OpenXR: controller input unavailable");
+        d.DestroyActions();
+    }
     return true;
 }
 
@@ -547,6 +751,7 @@ void OpenXrRuntime::DestroySession() {
         d.running = false;
     }
     d.pending_frames.clear();
+    d.DestroyActions();
     d.DestroySwapchains();
     for (XrSpace* space : {&d.app_space, &d.view_space, &d.local_space}) {
         if (*space != XR_NULL_HANDLE) {
@@ -790,6 +995,70 @@ bool OpenXrRuntime::Sample(u64 guest_time_us, TrackingSample& out) {
         out.angular_velocity = {velocity.angularVelocity.x, velocity.angularVelocity.y,
                                 velocity.angularVelocity.z};
     }
+    return true;
+}
+
+bool OpenXrRuntime::SyncInput(ControllerInput& out) {
+    auto& d = *impl;
+    std::scoped_lock lk{d.mutex};
+    if (!d.actions_attached || d.state != XR_SESSION_STATE_FOCUSED) {
+        return false;
+    }
+    const XrActiveActionSet active{.actionSet = d.action_set, .subactionPath = XR_NULL_PATH};
+    const XrActionsSyncInfo sync{
+        .type = XR_TYPE_ACTIONS_SYNC_INFO,
+        .countActiveActionSets = 1,
+        .activeActionSets = &active,
+    };
+    // XR_SESSION_NOT_FOCUSED is a success code that means "no input right now".
+    if (xrSyncActions(d.session, &sync) != XR_SUCCESS) {
+        return false;
+    }
+    for (u32 hand = 0; hand < HandCount; hand++) {
+        const XrPath path = d.hand_paths[hand];
+        HandInput& in = out.hands[hand];
+        const XrActionStateGetInfo info{
+            .type = XR_TYPE_ACTION_STATE_GET_INFO, .action = d.action_stick, .subactionPath = path};
+        XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
+        const bool have_stick =
+            XR_SUCCEEDED(xrGetActionStateVector2f(d.session, &info, &stick)) && stick.isActive;
+        XrActionStateGetInfo pose_info = info;
+        pose_info.action = d.action_grip;
+        XrActionStatePose pose{XR_TYPE_ACTION_STATE_POSE};
+        const bool have_pose =
+            XR_SUCCEEDED(xrGetActionStatePose(d.session, &pose_info, &pose)) && pose.isActive;
+        in.active = have_stick || have_pose;
+        in.stick_x = have_stick ? stick.currentState.x : 0.0f;
+        in.stick_y = have_stick ? stick.currentState.y : 0.0f;
+        in.trigger = d.GetFloat(d.action_trigger, path);
+        in.squeeze = d.GetFloat(d.action_squeeze, path);
+        in.primary = d.GetBool(d.action_primary, path);
+        in.secondary = d.GetBool(d.action_secondary, path);
+        in.stick_click = d.GetBool(d.action_stick_click, path);
+        in.menu = d.GetBool(d.action_menu, path);
+    }
+    return true;
+}
+
+bool OpenXrRuntime::LocateHand(Hand hand, u64 guest_time_us, Pose& out) {
+    auto& d = *impl;
+    std::scoped_lock lk{d.mutex};
+    if (!d.actions_attached || d.grip_spaces[hand] == XR_NULL_HANDLE ||
+        d.session == XR_NULL_HANDLE) {
+        return false;
+    }
+    XrTime time;
+    if (!d.GuestToXrTime(guest_time_us, time)) {
+        return false;
+    }
+    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+    constexpr XrSpaceLocationFlags Needed =
+        XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    if (XR_FAILED(xrLocateSpace(d.grip_spaces[hand], d.app_space, time, &location)) ||
+        (location.locationFlags & Needed) != Needed) {
+        return false;
+    }
+    out = FromXr(location.pose);
     return true;
 }
 

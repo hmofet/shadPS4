@@ -107,6 +107,7 @@ void SettingsWindow::LoadSettings(std::string profile) {
         vrRenderScaleSetting = EmulatorSettings.GetVrRenderScale();
         vrHmdRefreshSetting = GetComboIndex(std::to_string(EmulatorSettings.GetVrHmdRefreshHz()),
                                             vrHmdRefreshOptions);
+        vrControllersSetting = EmulatorSettings.IsVrControllersEnabled();
     }
 }
 
@@ -175,6 +176,7 @@ void SettingsWindow::SaveSettings(std::string profile) {
         EmulatorSettings.SetVrRenderScale(vrRenderScaleSetting, true);
         EmulatorSettings.SetVrHmdRefreshHz(
             static_cast<u32>(std::stoi(vrHmdRefreshOptions.at(vrHmdRefreshSetting))), true);
+        EmulatorSettings.SetVrControllersEnabled(vrControllersSetting, true);
     }
 
     isSpecific ? EmulatorSettings.Save(profile) : EmulatorSettings.Save();
@@ -811,6 +813,7 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
                 AddSettingSliderFloat("VR Render Scale", vrRenderScaleSetting, 1, 2, 2);
                 AddSettingCombo("VR Vblank Rate In VR Mode (Hz)", vrHmdRefreshSetting,
                                 vrHmdRefreshOptions);
+                AddSettingCheckbox("VR Controllers As DualShock 4", vrControllersSetting);
             }
 
             ImGui::EndTable();

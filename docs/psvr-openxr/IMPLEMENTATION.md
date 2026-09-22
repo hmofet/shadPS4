@@ -37,6 +37,7 @@ once when the game starts.
 | `render_scale` | 0.5 to 4.0 | Multiplier on the 1920x1080 panel size reported to the game. WipEout sizes each eye at 1.4x half the panel, so 1.4 gives eye textures the size of a Quest 3 view |
 | `recenter_key` | SDL scancode name | Recenters the view |
 | `hmd_refresh_hz` | 120 (default), 90, or 0 | Vblank rate while the game is in VR mode, as the PSVR panel drives it on a console; 0 keeps the GPU vblank frequency setting |
+| `controllers` | `true` / `false` | The headset's controllers act as the DualShock 4: sticks, triggers as R2/L2, grips as R1/L1, A/B as Cross/Circle, X/Y as Square/Triangle, stick clicks as L3/R3, menu as Options; the pad, Move or gun the tracker reports follows the right hand's grip |
 
 Desk mode keys (numpad): 4/6 yaw, 8/2 pitch, 7/9 roll, 1/3 strafe, +/- forward and back.
 
@@ -260,8 +261,11 @@ as any 1.4x panel.
   then whether SDL's default-device stream followed a default change made by Link. The
   `Audio3d ... queue.size() >= max_entries` errors also appear in runs with sound and are not
   the cause.
-- **Quest Touch controllers.** OpenXR action sets mapped onto the DualShock 4 (PR 5). Until
-  then a PC gamepad works.
+- **Quest Touch controllers: implemented, untested.** An action set with bindings for the Touch,
+  Index, Vive, Windows Mixed Reality and simple controller profiles is attached with the session
+  (`OpenXrRuntime::CreateActions`), synced from the tracker's result path and each headset frame,
+  and pushed to the first pad as changes (`VR::PollInput`). Built and run in desk mode only, where
+  no session exists; the log line `OpenXR: controllers active` is the first thing to look for.
 - **Frame rate under 60.** If the log still shows well under 60 frames/s with the 120 Hz vblank,
   the next candidates are the eye-texture readback path (`Readback Linear Images`) and the game's
   own GPU cost at the chosen `render_scale`.
@@ -274,6 +278,9 @@ as any 1.4x panel.
    about 60), and the first `render views: pose from the game (matched a sample), fov from the
    game` trace line.
 3. Comfort check: look around in the menus and during a race. The world should stay put.
+4. Touch controllers: `OpenXR: controllers active, mapped onto the DualShock 4` in the log, then
+   the right stick and A through the menus (and `OpenXR: no bindings for ...` lines say which
+   profiles the runtime declined, which is normal for the ones it does not implement).
 
 ## Coordinate mapping
 

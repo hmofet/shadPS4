@@ -64,6 +64,13 @@ void GetPanelResolution(u32& width, u32& height);
 bool SampleHead(u64 guest_time_us, bool is_render_pose, TrackingSample& out);
 void Recenter();
 
+// Grip pose of a tracked controller at `guest_time_us`, in tracking space. False without one
+// (no OpenXR session, controllers off, or the hand is not tracked).
+bool SampleController(bool right_hand, u64 guest_time_us, Pose& out);
+// Reads the headset's controllers and applies them to the first DualShock 4. Cheap to call
+// often; it syncs at most every few milliseconds and only pushes changes to the pad.
+void PollInput();
+
 // The views a frame handed to libSceHmdReprojection was rendered with. The head pose in `info`
 // is matched against the samples recently given to the game, so the eye poses are the exact
 // ones it rendered from; a pose that matches none is used as is with the headset's IPD. Missing

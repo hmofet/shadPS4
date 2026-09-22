@@ -2,14 +2,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <SDL3/SDL_keyboard.h>
 
+#include "common/singleton.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/time.h"
+#include "core/libraries/pad/pad.h"
 #include "core/vr/vr_service.h"
+#include "input/controller.h"
 
 namespace VR {
 
@@ -33,8 +37,17 @@ struct State {
     SDL_Scancode recenter_key = SDL_SCANCODE_UNKNOWN;
     bool recenter_key_down = false;
     u32 hmd_refresh_hz = 0;
+    bool controllers_enabled = true;
 
     std::atomic<bool> reprojection_active{false};
+
+    // Controller input as last applied to the pad, so only changes are pushed.
+    std::mutex input_mutex;
+    u64 last_input_sync_us = 0;
+    bool input_connected = false;
+#ifdef ENABLE_OPENXR
+    ControllerInput last_input{};
+#endif
 
     // The pose and FOV the game was last given, reported back with each submitted frame that
     // does not say which pose it used.
@@ -71,6 +84,7 @@ void Initialize(State& s) {
     if (!key.empty() && s.recenter_key == SDL_SCANCODE_UNKNOWN) {
         LOG_WARNING(Lib_Hmd, "Unknown VR recenter key '{}'", key);
     }
+    s.controllers_enabled = EmulatorSettings.IsVrControllersEnabled();
     s.hmd_refresh_hz = EmulatorSettings.GetVrHmdRefreshHz();
     if (s.hmd_refresh_hz != 0 && (s.hmd_refresh_hz < 30 || s.hmd_refresh_hz > 360)) {
         LOG_WARNING(Lib_Hmd, "VR hmd_refresh_hz {} is out of range, using 120", s.hmd_refresh_hz);
@@ -242,6 +256,117 @@ void Recenter() {
     Get().source.load()->Recenter();
 }
 
+bool SampleController(bool right_hand, u64 guest_time_us, Pose& out) {
+#ifdef ENABLE_OPENXR
+    State& s = Get();
+    if (!s.controllers_enabled) {
+        return false;
+    }
+    if (OpenXrRuntime* xr = GetOpenXr(s)) {
+        return xr->LocateHand(right_hand ? HandRight : HandLeft, guest_time_us, out);
+    }
+#endif
+    return false;
+}
+
+#ifdef ENABLE_OPENXR
+namespace {
+
+using Libraries::Pad::OrbisPadButtonDataOffset;
+
+int StickValue(float v) {
+    // OpenXR sticks are -1..1 with +y up; the pad wants 0..255 with y down.
+    const int units = static_cast<int>(std::lround(std::clamp(v, -1.0f, 1.0f) * 127.0f));
+    return Input::GetAxis(-0x80, 0x7f, units);
+}
+
+int TriggerValue(float v) {
+    return Input::GetAxis(0, 0x7f,
+                          static_cast<int>(std::lround(std::clamp(v, 0.0f, 1.0f) * 127.0f)));
+}
+
+// Pushes what changed since the last poll to the first pad. Called with input_mutex held.
+void ApplyControllerInput(State& s, const ControllerInput& in) {
+    auto& controllers = *Common::Singleton<Input::GameControllers>::Instance();
+    Input::GameController* pad = controllers[0];
+    const ControllerInput& old = s.last_input;
+
+    const bool active = in.hands[HandLeft].active || in.hands[HandRight].active;
+    if (active && !s.input_connected) {
+        // Show up as a connected pad when no physical one is; a physical pad keeps its handle.
+        if (pad->m_sdl_gamepad == nullptr) {
+            pad->ConnectController(nullptr);
+        }
+        s.input_connected = true;
+        LOG_INFO(Lib_Hmd, "OpenXR: controllers active, mapped onto the DualShock 4");
+    }
+
+    const auto button = [&](bool now, bool before, OrbisPadButtonDataOffset offset) {
+        if (now != before) {
+            pad->Button(offset, now);
+        }
+    };
+    const auto axis = [&](float now, float before, Input::Axis which, bool stick, bool invert) {
+        const int a = stick ? StickValue(invert ? -now : now) : TriggerValue(now);
+        const int b = stick ? StickValue(invert ? -before : before) : TriggerValue(before);
+        if (a != b) {
+            pad->Axis(which, a, false);
+        }
+    };
+
+    const HandInput& l = in.hands[HandLeft];
+    const HandInput& r = in.hands[HandRight];
+    const HandInput& ol = old.hands[HandLeft];
+    const HandInput& orr = old.hands[HandRight];
+
+    axis(l.stick_x, ol.stick_x, Input::Axis::LeftX, true, false);
+    axis(l.stick_y, ol.stick_y, Input::Axis::LeftY, true, true);
+    axis(r.stick_x, orr.stick_x, Input::Axis::RightX, true, false);
+    axis(r.stick_y, orr.stick_y, Input::Axis::RightY, true, true);
+    axis(l.trigger, ol.trigger, Input::Axis::TriggerLeft, false, false);
+    axis(r.trigger, orr.trigger, Input::Axis::TriggerRight, false, false);
+
+    constexpr float SqueezeOn = 0.5f;
+    button(l.squeeze > SqueezeOn, ol.squeeze > SqueezeOn, OrbisPadButtonDataOffset::L1);
+    button(r.squeeze > SqueezeOn, orr.squeeze > SqueezeOn, OrbisPadButtonDataOffset::R1);
+    button(r.primary, orr.primary, OrbisPadButtonDataOffset::Cross);
+    button(r.secondary, orr.secondary, OrbisPadButtonDataOffset::Circle);
+    button(l.primary, ol.primary, OrbisPadButtonDataOffset::Square);
+    button(l.secondary, ol.secondary, OrbisPadButtonDataOffset::Triangle);
+    button(l.stick_click, ol.stick_click, OrbisPadButtonDataOffset::L3);
+    button(r.stick_click, orr.stick_click, OrbisPadButtonDataOffset::R3);
+    button(l.menu || r.menu, ol.menu || orr.menu, OrbisPadButtonDataOffset::Options);
+
+    s.last_input = in;
+}
+
+} // namespace
+#endif
+
+void PollInput() {
+#ifdef ENABLE_OPENXR
+    State& s = Get();
+    if (!s.controllers_enabled) {
+        return;
+    }
+    OpenXrRuntime* xr = GetOpenXr(s);
+    if (xr == nullptr) {
+        return;
+    }
+    constexpr u64 SyncIntervalUs = 4'000;
+    const u64 now = Libraries::Kernel::sceKernelGetProcessTime();
+    std::scoped_lock lk{s.input_mutex};
+    if (now - s.last_input_sync_us < SyncIntervalUs) {
+        return;
+    }
+    s.last_input_sync_us = now;
+    ControllerInput in;
+    if (xr->SyncInput(in)) {
+        ApplyControllerInput(s, in);
+    }
+#endif
+}
+
 void PollRecenterKey() {
     State& s = Get();
     if (s.recenter_key == SDL_SCANCODE_UNKNOWN) {
@@ -388,6 +513,7 @@ FrameSubmit BeginFrame() {
         xr->PollEvents();
     }
 #endif
+    PollInput();
     frame.vr_active = s.reprojection_active.load();
     if (!frame.vr_active) {
 #ifdef ENABLE_OPENXR

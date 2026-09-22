@@ -182,6 +182,7 @@ private:
     int vrMirrorSetting;
     float vrRenderScaleSetting;
     int vrHmdRefreshSetting;
+    bool vrControllersSetting;
 };
 
 } // namespace ImGuiEmuSettings

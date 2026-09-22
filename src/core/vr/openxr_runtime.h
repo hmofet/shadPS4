@@ -27,6 +27,30 @@ struct EyeTarget {
     VkFormat format = VK_FORMAT_UNDEFINED;
 };
 
+enum Hand : u32 {
+    HandLeft = 0,
+    HandRight = 1,
+    HandCount = 2,
+};
+
+// The state of one tracked controller, in the terms of a DualShock 4 half: a stick, a trigger,
+// a grip, two face buttons, the stick click and the menu button.
+struct HandInput {
+    bool active = false;    // the runtime has a controller bound for this hand
+    float stick_x = 0.0f;   // -1 left .. 1 right
+    float stick_y = 0.0f;   // -1 down .. 1 up
+    float trigger = 0.0f;   // 0 .. 1
+    float squeeze = 0.0f;   // 0 .. 1
+    bool primary = false;   // A on the right, X on the left
+    bool secondary = false; // B on the right, Y on the left
+    bool stick_click = false;
+    bool menu = false;
+};
+
+struct ControllerInput {
+    std::array<HandInput, HandCount> hands{};
+};
+
 // An OpenXR instance, system and session sharing the emulator's Vulkan device
 // (XR_KHR_vulkan_enable2). Doubles as the pose source.
 class OpenXrRuntime final : public PoseSource {
@@ -79,6 +103,12 @@ public:
     std::string_view Name() const override {
         return "openxr";
     }
+    // Reads the controllers' buttons and axes (xrSyncActions). False when the session is not
+    // focused or no action set could be attached; the game keeps whatever input it had.
+    bool SyncInput(ControllerInput& out);
+    // Grip pose of one controller at a guest time, in tracking space. False when untracked.
+    bool LocateHand(Hand hand, u64 guest_time_us, Pose& out);
+
     bool Sample(u64 guest_time_us, TrackingSample& out) override;
     void Recenter() override;
     FovTangents GetEyeFov(Eye eye) const override;

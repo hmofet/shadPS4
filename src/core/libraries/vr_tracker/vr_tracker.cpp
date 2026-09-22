@@ -297,6 +297,7 @@ s32 PS4_SYSV_ABI sceVrTrackerGetResult(const OrbisVrTrackerGetResultParam* param
     }
 
     VR::PollRecenterKey();
+    VR::PollInput();
 
     const u64 now = Libraries::Kernel::sceKernelGetProcessTime();
     u64 target_time = now;
@@ -354,10 +355,14 @@ s32 PS4_SYSV_ABI sceVrTrackerGetResult(const OrbisVrTrackerGetResultParam* param
                  hmd.head_pose.orientation_x, hmd.head_pose.orientation_y,
                  hmd.head_pose.orientation_z, hmd.head_pose.orientation_w);
     } else {
-        // No controller tracking yet: hold the device at a fixed spot below and in front of the
-        // head, facing the way the head faces.
-        const VR::Quat heading = VR::YawOnly(sample.head.orientation);
-        const VR::Pose device{heading, sample.head.position + VR::Rotate(heading, PadOffset)};
+        // The right hand's controller stands in for the pad, Move or gun. Without one, hold
+        // the device at a fixed spot below and in front of the head, facing the way the head
+        // faces.
+        VR::Pose device;
+        if (!VR::SampleController(true, target_time, device)) {
+            const VR::Quat heading = VR::YawOnly(sample.head.orientation);
+            device = {heading, sample.head.position + VR::Rotate(heading, PadOffset)};
+        }
         OrbisVrTrackerPoseData* pose = is_pad    ? &result->pad_info.device_pose
                                        : is_move ? &result->move_info.device_pose
                                                  : &result->gun_info.device_pose;

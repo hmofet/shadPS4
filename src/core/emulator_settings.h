@@ -531,6 +531,9 @@ struct VRSettings {
     // Vblank rate while the game is in VR mode, as a PSVR's 120 Hz (or 90 Hz) panel drives it on
     // a console. 0 keeps the GPU vblank frequency setting.
     Setting<u32> hmd_refresh_hz{120};
+    // Use the headset's tracked controllers as the DualShock 4 (buttons, sticks, and the pad's
+    // position from the right hand's grip).
+    Setting<bool> controllers{true};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -542,11 +545,13 @@ struct VRSettings {
             make_override<VRSettings>("render_scale", &VRSettings::render_scale),
             make_override<VRSettings>("recenter_key", &VRSettings::recenter_key),
             make_override<VRSettings>("hmd_refresh_hz", &VRSettings::hmd_refresh_hz),
+            make_override<VRSettings>("controllers", &VRSettings::controllers),
         };
     }
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(VRSettings, psvr_enabled, pose_source, eye_source, fov_mode,
-                                   mirror, render_scale, recenter_key, hmd_refresh_hz)
+                                   mirror, render_scale, recenter_key, hmd_refresh_hz,
+                                   controllers)
 
 // -------------------------------
 // Main manager
@@ -841,6 +846,7 @@ public:
     SETTING_FORWARD(m_vr, VrRenderScale, render_scale)
     SETTING_FORWARD(m_vr, VrRecenterKey, recenter_key)
     SETTING_FORWARD(m_vr, VrHmdRefreshHz, hmd_refresh_hz)
+    SETTING_FORWARD_BOOL(m_vr, VrControllersEnabled, controllers)
 
 #undef SETTING_FORWARD
 #undef SETTING_FORWARD_BOOL
