@@ -279,6 +279,15 @@ private:
     }
 
     /// Copies image memory back to CPU.
+    // One image's copy to a download buffer, recorded but not yet waited for.
+    struct PendingDownload {
+        VAddr guest_address;
+        u8* data;
+        u32 size;
+    };
+    // Records the copy and returns where its bytes will land, or nothing when the image holds
+    // nothing the GPU wrote. The caller waits for the GPU before reading `data`.
+    std::optional<PendingDownload> RecordImageDownload(ImageId image_id);
     void DownloadImageMemory(ImageId image_id, bool sync = false);
 
     /// Thread function for copying downloaded images out to CPU memory.

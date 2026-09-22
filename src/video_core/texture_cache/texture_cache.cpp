@@ -62,16 +62,33 @@ TextureCache::~TextureCache() = default;
 
 void TextureCache::ProcessDownloadImages() {
     std::unique_lock lk{download_images_mutex};
+    if (download_images.empty()) {
+        return;
+    }
+    // Record every copy first and wait for the GPU once. Waiting per image cost a full round
+    // trip each, which is what a frame's worth of linear render targets used to spend.
+    boost::container::small_vector<PendingDownload, 8> pending;
     for (const ImageId image_id : download_images) {
-        DownloadImageMemory(image_id, true);
+        if (const auto download = RecordImageDownload(image_id)) {
+            pending.push_back(*download);
+        }
     }
     download_images.clear();
+    if (pending.empty()) {
+        return;
+    }
+    scheduler.Finish();
+    auto* memory = Core::Memory::Instance();
+    for (const auto& download : pending) {
+        memory->TryWriteBacking(std::bit_cast<u8*>(download.guest_address), download.data,
+                                download.size);
+    }
 }
 
-void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
+std::optional<TextureCache::PendingDownload> TextureCache::RecordImageDownload(ImageId image_id) {
     Image& image = slot_images[image_id];
     if (False(image.flags & ImageFlagBits::GpuModified)) {
-        return;
+        return std::nullopt;
     }
     auto& download_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
     const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
@@ -100,15 +117,27 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
                              download_buffer.Handle(), image_download);
 
+    return PendingDownload{
+        .guest_address = image.info.guest_address,
+        .data = download,
+        .size = download_size,
+    };
+}
+
+void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
+    const auto download = RecordImageDownload(image_id);
+    if (!download) {
+        return;
+    }
     if (sync) {
         scheduler.Finish();
-        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
-                                                  download, download_size);
+        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(download->guest_address),
+                                                  download->data, download->size);
     } else {
         scheduler.DeferPriorityOperation(
-            [this, device_addr = image.info.guest_address, download, download_size] {
-                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr), download,
-                                                          download_size);
+            [device_addr = download->guest_address, data = download->data, size = download->size] {
+                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr), data,
+                                                          size);
             });
     }
 }
