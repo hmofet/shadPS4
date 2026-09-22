@@ -435,6 +435,9 @@ struct GPUSettings {
     Setting<bool> rcas_enabled{true};
     Setting<int> rcas_attenuation{250};
     Setting<bool> userfaultfd{false};
+    // Multiplier on the GPU time the guest measures with EOP timestamps (PerfCounter and
+    // GpuClock64). Below 1.0 the game believes the GPU is faster than a PS4; 1.0 is unchanged.
+    Setting<float> gpu_time_scale{1.0f};
     // TODO add overrides
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -457,6 +460,7 @@ struct GPUSettings {
             make_override<GPUSettings>("direct_memory_access_enabled",
                                        &GPUSettings::direct_memory_access_enabled),
             make_override<GPUSettings>("vblank_frequency", &GPUSettings::vblank_frequency),
+            make_override<GPUSettings>("gpu_time_scale", &GPUSettings::gpu_time_scale),
         };
     }
 };
@@ -465,7 +469,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, int
                                    readbacks_mode, readback_linear_images_enabled,
                                    direct_memory_access_enabled, dump_shaders, patch_shaders,
                                    vblank_frequency, full_screen, full_screen_mode, present_mode,
-                                   hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation)
+                                   hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
+                                   gpu_time_scale)
 // -------------------------------
 // Vulkan settings
 // -------------------------------
@@ -792,6 +797,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, DirectMemoryAccessEnabled, direct_memory_access_enabled)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, PatchShaders, patch_shaders)
     SETTING_FORWARD_BOOL(m_gpu, UserfaultfdTracking, userfaultfd)
+    SETTING_FORWARD(m_gpu, GpuTimeScale, gpu_time_scale)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

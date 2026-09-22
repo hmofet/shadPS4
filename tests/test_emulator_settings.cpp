@@ -890,3 +890,25 @@ TEST_F(EmulatorSettingsTest, VrKeysAreOverrideable) {
         EXPECT_NE(std::find(keys.begin(), keys.end(), key), keys.end()) << key;
     }
 }
+
+// GPU time scale (what the guest's EOP timestamps report as elapsed GPU time)
+
+TEST_F(EmulatorSettingsTest, GpuTimeScaleDefaultsToOne) {
+    EXPECT_FLOAT_EQ(temp_settings->GetGpuTimeScale(), 1.0f);
+}
+
+TEST_F(EmulatorSettingsTest, GpuTimeScalePerGameOverrideLoads) {
+    json game;
+    game["GPU"]["gpu_time_scale"] = 0.1;
+    WriteJson(GameConfig("CUSA05670"), game);
+    ASSERT_TRUE(temp_settings->Load("CUSA05670"));
+
+    EXPECT_FLOAT_EQ(temp_settings->GetGpuTimeScale(), 0.1f);
+    temp_settings->SetConfigMode(ConfigMode::Global);
+    EXPECT_FLOAT_EQ(temp_settings->GetGpuTimeScale(), 1.0f);
+}
+
+TEST_F(EmulatorSettingsTest, GpuTimeScaleIsOverrideable) {
+    const auto keys = temp_settings->GetAllOverrideableKeys();
+    EXPECT_NE(std::find(keys.begin(), keys.end(), "gpu_time_scale"), keys.end());
+}
