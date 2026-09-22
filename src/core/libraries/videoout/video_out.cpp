@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+
 #include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -144,8 +146,18 @@ s32 PS4_SYSV_ABI sceVideoOutSetFlipRate(s32 handle, s32 rate) {
     return ORBIS_OK;
 }
 
+// Games can drive dynamic resolution from missed flips. Logs the first calls and then every
+// 600th, so a log shows whether a title polls flip status and when.
+static void TraceFlipStatusPoll(const char* function, std::atomic<u64>& count) {
+    const u64 n = count.fetch_add(1, std::memory_order_relaxed);
+    if (n < 16 || n % 600 == 0) {
+        LOG_DEBUG(Lib_VideoOut, "{} call #{}", function, n);
+    }
+}
+
 s32 PS4_SYSV_ABI sceVideoOutIsFlipPending(s32 handle) {
-    LOG_TRACE(Lib_VideoOut, "called");
+    static std::atomic<u64> poll_count{0};
+    TraceFlipStatusPoll("sceVideoOutIsFlipPending", poll_count);
     auto* port = driver->GetPort(handle);
     std::unique_lock lock{port->port_mutex};
     s32 pending = port->flip_status.flip_pending_num;
@@ -242,6 +254,8 @@ s32 PS4_SYSV_ABI sceVideoOutGetEventCount(const Kernel::OrbisKernelEvent* ev) {
 }
 
 s32 PS4_SYSV_ABI sceVideoOutGetFlipStatus(s32 handle, FlipStatus* status) {
+    static std::atomic<u64> poll_count{0};
+    TraceFlipStatusPoll("sceVideoOutGetFlipStatus", poll_count);
     if (!status) {
         LOG_ERROR(Lib_VideoOut, "Flip status is null");
         return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS;
