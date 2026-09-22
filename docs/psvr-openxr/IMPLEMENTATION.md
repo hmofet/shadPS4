@@ -260,6 +260,10 @@ not been tried; the frame rate one needs real work.
 
 #### 1. The game halves its own resolution in a race
 
+**Update 2026-09-22: diagnosed.** The game runs a many-step dynamic resolution driven by the
+EOP `PerfCounter` timestamps; `gpu_time_scale` 0.1 holds the full size in a race. The table and
+the "two sizes" reading below are superseded; see QUALITY-OVERRIDE-PLAN.md, "Phase 0 results".
+
 The screenshot hotkey saves the eye exactly as the game rendered it, and the `eyes:` trace line
 reports the size the game itself put in the eye T#, so both agree: the game, not the emulator,
 chooses this.
