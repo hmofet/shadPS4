@@ -197,7 +197,7 @@ actually are.
 EOP `PerfCounter` timestamps.** With `gpu_time_scale` 0.1 the race holds the full eye size.
 Phase 2 (a policy patch) is not needed for the resolution; Phase 1 is the fix.
 
-Setup: build 3d00984b (Phase 1 steps 1 to 3 plus the diagnostics below), Meta runtime 1.207.0
+Setup: a build with the code listed below (the `quality-override` branch), Meta runtime 1.207.0
 over **Air Link, not the cable** (recommended eye size 1600x1712, 120 Hz), and another agent
 running an APK on the same headset during run 0b. Frame rates are therefore indicative only.
 
@@ -254,15 +254,17 @@ What the game measures (0c, `Render` debug lines from `liverpool.cpp`):
   `sceVideoOutIsFlipPending` only 16 times, at boot.** Flip status is polled, but 0b shows the
   timestamps alone are enough to move the controller.
 
-Code from this session (all on `psvr-openxr`):
+Code from this session. Branches: PSVR support stays on `psvr-openxr` (stock rendering, meant
+for upstream); everything in this plan, including the render-bug investigation below, is on
+`quality-override`, which is based on `psvr-openxr`. The eye-size log (99d234d3) is PSVR work:
 
-- `gpu.gpu_time_scale` (df8eea4d), applied around the first sample so the counters stay
+- `gpu.gpu_time_scale` (1b7e9477), applied around the first sample so the counters stay
   monotonic; fixed at first use, clamped to 0.01 to 100.
-- EOP and ReleaseMem timestamps sampled before `ProcessDownloadImages` (f8ad294b), always on,
+- EOP and ReleaseMem timestamps sampled before `ProcessDownloadImages` (356d61e8), always on,
   not a setting. `EventWriteEos` carries no timestamp and is unchanged.
-- `GpuClock64` as a 100 MHz reference-clock counter with the same scale (18d34840).
+- `GpuClock64` as a 100 MHz reference-clock counter with the same scale (b17f7e91).
 - Diagnostics: `Render` debug lines for PerfCounter EOPs (16 of every 512), flip-status polling
-  at `Lib.VideoOut` debug (20846d73), and every eye-size change at `Lib.Hmd` info (3d00984b).
+  at `Lib.VideoOut` debug (d5bd6f51), and every eye-size change at `Lib.Hmd` info (99d234d3).
 - A controller binding for the game-only screenshot: `hotkey_capture_frame = back` in
   `input_config/global.ini` (the DualSense Create button). No code; it also keeps sending the
   touchpad click that `default.ini` maps to that button.
