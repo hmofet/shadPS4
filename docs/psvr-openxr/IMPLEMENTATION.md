@@ -260,6 +260,12 @@ not been tried; the frame rate one needs real work.
 
 #### 1. The game halves its own resolution in a race
 
+**Update 2026-09-22:** the eye target has 16 sizes from half to full, not two; the game runs
+its own dynamic resolution, and `Lib.Hmd` now logs every size change. The controller follows
+the EOP `PerfCounter` timestamps, so this is not a PSVR support problem: stock shadPS4 renders
+what the game asks for. Work on raising the game's choice lives on the `quality-override`
+branch, kept apart from PSVR support. The table below is from the two-size reading.
+
 The screenshot hotkey saves the eye exactly as the game rendered it, and the `eyes:` trace line
 reports the size the game itself put in the eye T#, so both agree: the game, not the emulator,
 chooses this.
