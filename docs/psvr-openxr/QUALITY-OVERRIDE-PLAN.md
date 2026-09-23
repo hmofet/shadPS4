@@ -227,15 +227,31 @@ What the runs show:
   button screenshots, 1882x2117) and **not caused by the time scale**: a full-size START RACE
   screenshot from the earlier session at 1.0, on the older build, shows both artifacts too.
   They are existing rendering bugs that the 944-wide race used to hide:
-  - **The track surface renders black.** At 417 km/h the road is black except inside the
-    screen-space rectangle of the speed-trail effect, where the road texture shows; the 944-wide
-    shots at 1.0 show the same black road. Worth checking the track's material passes
-    (reflection or lightmap sampling) and whatever that effect's scene copy reads that the main
-    pass does not.
-  - **The START RACE frames are posterized** (hard colour bands and dither in the sky and on
-    surfaces); the race frames' sky is smooth. Suspect a render target format or a pre-race
-    post-processing path.
-  Both are separate from this plan and need their own session (RenderDoc capture of one frame).
+  - **The track surface rendered black: fixed (4f7b5b57, 2026-09-23).** A shader recompiler bug,
+    present in upstream shadPS4 too. The track's pixel shader samples its albedo with
+    `IMAGE_SAMPLE_CD` (sample with coarse derivatives). The decoder marks that opcode
+    `CoarseDerivative`, but `EmitImageSample` enabled gradient sampling only for `Derivative`,
+    so the gradients, which come first in the address registers, were used as the UV. Every
+    road pixel read the texture's corner texel, a dark border line. Found in a RenderDoc capture
+    of a race frame: pixel history showed the track draws writing about 0.0003; replacing the
+    shader with variants that output intermediate terms ruled out the real-time shadow (lit)
+    and the lightmap (sane; its alpha is a baked sun mask, black in tunnels) and showed the
+    albedo sampled at `vec2(ddx(u), ddx(v))`. Confirmed in game: the road is textured and shaded
+    at the START RACE prompt and in the race. A good candidate for a standalone upstream PR.
+  - **Posterization (open).** Hard colour bands in the sky and steps in dark areas, in the
+    START RACE frames *and* in race frames (the earlier note that races were smooth was wrong).
+    The eye scene target is R11G11B10_FLOAT with 4x MSAA, resolved to a single-sample
+    R11G11B10 copy, then tonemapped into the R8G8B8A8_SRGB eye array; suspect a pass in that
+    chain losing precision. Two pre-race RenderDoc captures exist for it
+    (`%APPDATA%\shadPS4\captures\CUSA05670_capture.rdc` and `_2.rdc`).
+  How the captures are automated (desk mode, no headset): per-game config with
+  `VR.pose_source: desk` and `Vulkan.renderdoc_enabled: true`, keyboard input through SendInput
+  (`n` = cross, arrows = D-pad) from an unlocked, connected desktop session, F12 = RenderDoc
+  capture while RenderDoc is loaded (a game screenshot otherwise). Captures are about 5.5 GB.
+  RenderDoc's Python API (`qrenderdoc --python`) does the analysis; its GLSL rebuild targets too
+  old a SPIR-V for these shaders, so edited shaders are compiled with the bundled
+  `glslangValidator --target-env vulkan1.1` and passed as SPIR-V.
+  Both are emulator bugs rather than part of this plan.
 
 What the game measures (0c, `Render` debug lines from `liverpool.cpp`):
 
@@ -273,7 +289,7 @@ for upstream); everything in this plan, including the render-bug investigation b
 
 | Setting | Default | Effect | Acceptance test |
 |---|---|---|---|
-| `gpu.gpu_time_scale` | 1.0 | Scales elapsed GPU time reported by EOP timestamps (PerfCounter and GpuClock64) | **Done, passed:** a WipEout race at 0.1 holds 1882x2117 (Phase 0 results); the black track and posterization seen with it predate it |
+| `gpu.gpu_time_scale` | 1.0 | Scales elapsed GPU time reported by EOP timestamps (PerfCounter and GpuClock64) | **Done, passed:** a WipEout race at 0.1 holds 1882x2117 (Phase 0 results); the black track seen with it was a recompiler bug, fixed in 4f7b5b57; the posterization predates it and is open |
 | (timestamp before readback) | always | Samples EOP time before the readback drain | **Done, built in rather than a setting.** No effect on WipEout: the drain at the EOP sites is under 0.2 ms |
 | `general.neo_mode` in the max profile | off | PS4 Pro paths | WipEout boots and runs a race in Neo mode |
 | `vr.render_scale = auto` | 1.4 | Panel scale from the runtime's eye size | `eyes:` line matches the swapchain size in a race |
