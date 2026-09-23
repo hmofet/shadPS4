@@ -1,0 +1,10 @@
+import os, renderdoc as rd
+o = os.environ["RD_OUT"]; eid = int(os.environ["RD_EID"])
+cap = rd.OpenCaptureFile(); cap.OpenFile(os.environ["RD_CAP"], "", None)
+r, ctrl = cap.OpenCapture(rd.ReplayOptions(), None)
+ctrl.SetFrameEvent(eid, True)
+pipe = ctrl.GetPipelineState()
+refl = pipe.GetShaderReflection(rd.ShaderStage.Pixel)
+open(os.path.join(o, "ps_%d.spv" % eid), "wb").write(bytes(refl.rawBytes))
+open(os.path.join(o, "ps_%d.info" % eid), "w").write("%s %s %d\n" % (refl.entryPoint, int(pipe.GetShader(rd.ShaderStage.Pixel)), refl.encoding))
+ctrl.Shutdown(); cap.Shutdown(); os._exit(0)

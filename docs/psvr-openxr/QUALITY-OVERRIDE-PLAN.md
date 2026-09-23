@@ -1,5 +1,7 @@
 # Forcing the highest shipped quality: analysis and plan
 
+**Resuming? Start with QUALITY-HANDOFF.md** (state, next steps, and the capture tools).
+
 Written 2026-09-22 against branch `psvr-openxr` at 323cba5e (the private remote is at the same
 commit, the tree is clean, and neither of the two problems handed over in IMPLEMENTATION.md
 "Not fixed yet" has been touched since).
