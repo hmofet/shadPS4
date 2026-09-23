@@ -223,11 +223,19 @@ What the runs show:
   earlier session. With 0b in place the reason for 2.8 (landing the half step on the headset's
   size) is gone anyway.
 - **Image in 0b:** the user reports it "looks much better" with visibly higher resolution, but
-  **something is wrong with the textures, especially on the track**. Not captured: F12 needs the
-  desktop window focused, and the retry with a controller binding (below) was cut short by an
-  Air Link problem. Suspects: the game ties texture LOD or streaming to its resolution level,
-  or reads the same timestamps for something time-based that a 10x fast clock breaks. Next
-  session: capture it, then try 0.3 and 0.5 to see whether it scales with the factor.
+  with wrong-looking textures, especially on the track. Captured in a second 0b session (Create
+  button screenshots, 1882x2117) and **not caused by the time scale**: a full-size START RACE
+  screenshot from the earlier session at 1.0, on the older build, shows both artifacts too.
+  They are existing rendering bugs that the 944-wide race used to hide:
+  - **The track surface renders black.** At 417 km/h the road is black except inside the
+    screen-space rectangle of the speed-trail effect, where the road texture shows; the 944-wide
+    shots at 1.0 show the same black road. Worth checking the track's material passes
+    (reflection or lightmap sampling) and whatever that effect's scene copy reads that the main
+    pass does not.
+  - **The START RACE frames are posterized** (hard colour bands and dither in the sky and on
+    surfaces); the race frames' sky is smooth. Suspect a render target format or a pre-race
+    post-processing path.
+  Both are separate from this plan and need their own session (RenderDoc capture of one frame).
 
 What the game measures (0c, `Render` debug lines from `liverpool.cpp`):
 
@@ -263,7 +271,7 @@ Code from this session (all on `psvr-openxr`):
 
 | Setting | Default | Effect | Acceptance test |
 |---|---|---|---|
-| `gpu.gpu_time_scale` | 1.0 | Scales elapsed GPU time reported by EOP timestamps (PerfCounter and GpuClock64) | **Done, passed:** a WipEout race at 0.1 holds 1882x2117 (Phase 0 results); track textures look wrong, not yet explained |
+| `gpu.gpu_time_scale` | 1.0 | Scales elapsed GPU time reported by EOP timestamps (PerfCounter and GpuClock64) | **Done, passed:** a WipEout race at 0.1 holds 1882x2117 (Phase 0 results); the black track and posterization seen with it predate it |
 | (timestamp before readback) | always | Samples EOP time before the readback drain | **Done, built in rather than a setting.** No effect on WipEout: the drain at the EOP sites is under 0.2 ms |
 | `general.neo_mode` in the max profile | off | PS4 Pro paths | WipEout boots and runs a race in Neo mode |
 | `vr.render_scale = auto` | 1.4 | Panel scale from the runtime's eye size | `eyes:` line matches the swapchain size in a race |
