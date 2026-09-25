@@ -197,6 +197,9 @@ void InitHLELibs(Core::Loader::SymbolsResolver* sym) {
             }
         }
     }
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+    Libraries::LibcInternal::RegisterFexAliases(sym);
+#endif
 }
 
 } // namespace Libraries

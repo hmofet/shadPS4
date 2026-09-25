@@ -47,6 +47,14 @@ void PS4_SYSV_ABI sceLibcHeapGetTraceInfo(HeapInfoInfo* info) {
     info->getSegmentInfo = 0;
 }
 
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+void RegisterFexLibcMemoryAliases(Core::Loader::SymbolsResolver* sym) {
+    LIB_FUNCTION("Q3VBxCXhUHs", "libc", 1, "libc", internal_memcpy);
+    LIB_FUNCTION("8zTFvBIAIN8", "libc", 1, "libc", internal_memset);
+    LIB_FUNCTION("DfivPArhucg", "libc", 1, "libc", internal_memcmp);
+}
+#endif
+
 void RegisterlibSceLibcInternalMemory(Core::Loader::SymbolsResolver* sym) {
 
     LIB_FUNCTION("NFLs+dRJGNg", "libSceLibcInternal", 1, "libSceLibcInternal", internal_memcpy_s);

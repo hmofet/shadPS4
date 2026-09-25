@@ -20,6 +20,9 @@
 #include "core/tls.h"
 #include "core/user_manager.h"
 #include "np_handler.h"
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+#include "core/guest_cpu/guest_callback.h"
+#endif
 
 namespace Libraries::Np::NpManager {
 

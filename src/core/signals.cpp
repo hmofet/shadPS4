@@ -9,6 +9,9 @@
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/threads/exception.h"
 #include "core/signals.h"
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+#include "core/fex/fex_guest_engine.h"
+#endif
 #include "emulator.h"
 
 #ifdef _WIN32
@@ -267,11 +270,24 @@ void SignalHandler(int sig, siginfo_t* info, void* raw_context) {
     switch (sig) {
     case SIGSEGV:
     case SIGBUS: {
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+        if (sig == SIGBUS && ::Core::Fex::HandleGuestSignal(sig, info, raw_context)) {
+            return;
+        }
+#endif
         const bool is_write = Common::IsWriteError(raw_context);
         if (!signals->DispatchAccessViolation(raw_context, info->si_addr)) {
             if (thread && thread->DispatchSignal(NativeToOrbisSignal(sig), info_p, context_p)) {
                 return;
             }
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+            uint64_t guest_rip = 0;
+            uint64_t guest_rax = 0;
+            if (::Core::Fex::BachataQueryGuestRipSyscall(&guest_rip, &guest_rax)) {
+                LOG_CRITICAL(Debug, "FEX guest state at fault: rip={:#x} rax={:#x}", guest_rip,
+                             guest_rax);
+            }
+#endif
             UNREACHABLE_MSG("Unhandled access violation at code address {}: {} address {}",
                             fmt::ptr(code_address), is_write ? "Write to" : "Read from",
                             fmt::ptr(info->si_addr));

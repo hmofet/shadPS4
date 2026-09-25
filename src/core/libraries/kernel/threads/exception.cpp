@@ -7,6 +7,10 @@
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/threads/exception.h"
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+#include "core/fex/fex_guest_engine.h"
+#include "core/guest_cpu/hle_call_adapter.h"
+#endif
 #include "core/libraries/kernel/threads/pthread.h"
 #include "core/libraries/libs.h"
 #include "core/signals.h"

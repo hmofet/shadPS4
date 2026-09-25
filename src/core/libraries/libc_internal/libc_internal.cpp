@@ -12,6 +12,9 @@
 #include "libc_internal_memory.h"
 #include "libc_internal_str.h"
 #include "libc_internal_threads.h"
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+#include "libc_internal_cxa.h"
+#endif
 #include "printf.h"
 
 namespace Libraries::LibcInternal {
@@ -23,5 +26,15 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     RegisterlibSceLibcInternalIo(sym);
     RegisterlibSceLibcInternalThreads(sym);
 }
+
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+void RegisterFexAliases(Core::Loader::SymbolsResolver* sym) {
+    // Hot libc routines run natively instead of through the translator.
+    RegisterFexLibcMemoryAliases(sym);
+    RegisterFexLibcMathAliases(sym);
+    RegisterFexLibcStrAliases(sym);
+    RegisterFexLibcCxaAliases(sym);
+}
+#endif
 
 } // namespace Libraries::LibcInternal

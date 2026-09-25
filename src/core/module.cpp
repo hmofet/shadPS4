@@ -101,7 +101,20 @@ Module::~Module() = default;
 s32 Module::Start(u64 args, const void* argp, void* param) {
     LOG_INFO(Core_Linker, "Module started : {}", name);
     const VAddr addr = dynamic_info.init_virtual_addr + GetBaseAddress();
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+    const std::array<u64, 3> arguments{args, reinterpret_cast<u64>(argp),
+                                       reinterpret_cast<u64>(param)};
+    auto* linker = Common::Singleton<Linker>::Instance();
+    const auto result = linker->RunGuestFunction(addr, arguments);
+    if (const auto* failure = std::get_if<GuestExecutionFailure>(&result)) {
+        LOG_ERROR(Core_Linker, "FEX module start {} failed at stage {}: {}", name,
+                  static_cast<int>(failure->Stage), failure->Error);
+        return failure->Error == 0 ? -1 : -failure->Error;
+    }
+    return static_cast<s32>(std::get<u64>(result));
+#else
     return reinterpret_cast<EntryFunc>(addr)(args, argp, param);
+#endif
 }
 
 void Module::LoadModuleToMemory(u32& max_tls_index) {

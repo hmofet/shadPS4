@@ -15,4 +15,9 @@ namespace Libraries::LibcInternal {
 // so everything is just in the .cpp file
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym);
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+// libc routines that run natively instead of through FEX, whether or not the
+// real libSceLibcInternal is loaded.
+void RegisterFexAliases(Core::Loader::SymbolsResolver* sym);
+#endif
 } // namespace Libraries::LibcInternal
