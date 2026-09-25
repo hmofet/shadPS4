@@ -4,6 +4,7 @@
 #include <fmt/format.h>
 #include "common/io_file.h"
 #include "common/string_util.h"
+#include "common/logging/log.h"
 #include "common/types.h"
 #include "core/aerolib/aerolib.h"
 #include "core/loader/symbols_resolver.h"
@@ -28,6 +29,10 @@ void SymbolsResolver::AddFunction(const SymbolResolver& s,
         return;
     }
     const std::string name = GenerateName(s);
+    if (!adapter->IsSupported()) {
+        LOG_WARNING(Core_Linker, "FEX cannot marshal the signature of HLE function {} ({})",
+                    s.name, name);
+    }
     adapter = GetHleCallRegistry().Register(std::move(adapter), name);
     if (adapter == nullptr) {
         return;

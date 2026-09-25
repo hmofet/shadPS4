@@ -659,7 +659,9 @@ struct AddressSpace::Impl {
             mmap(reinterpret_cast<void*>(USER_MIN), user_size, protection_flags, map_flags, -1, 0));
 #else
         const auto virtual_size = system_managed_size + system_reserved_size + user_size;
-#if defined(ARCH_X86_64) && !defined(__FreeBSD__)
+#if (defined(ARCH_X86_64) && !defined(__FreeBSD__)) || (defined(__linux__) && defined(ARCH_ARM64))
+        // Guest code expects its own addresses, so the range must start at SYSTEM_MANAGED_MIN.
+        // A 48-bit ARM64 Linux address space holds it below the executable, as on x86-64.
         const auto virtual_base =
             reinterpret_cast<u8*>(mmap(reinterpret_cast<void*>(SYSTEM_MANAGED_MIN), virtual_size,
                                        protection_flags, map_flags, -1, 0));

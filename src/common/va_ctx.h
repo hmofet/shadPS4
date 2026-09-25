@@ -36,9 +36,30 @@ typedef __int128 __m128;
     (ctx).va_list.reg_save_area = &(ctx).reg_save_area;                                            \
     (ctx).va_list.gp_offset = offsetof(::Common::VaRegSave, gp);                                   \
     (ctx).va_list.fp_offset = offsetof(::Common::VaRegSave, fp);                                   \
-    (ctx).va_list.overflow_arg_area = &overflow_arg_area;
+    (ctx).va_list.overflow_arg_area = ::Common::g_guest_va_overflow_area                            \
+                                          ? ::Common::g_guest_va_overflow_area                      \
+                                          : &overflow_arg_area;
 
 namespace Common {
+
+// On x86-64 hosts the overflow_arg_area parameter of a VA_ARGS function sits where the caller
+// put the stack arguments, so VA_CTX takes its address. When a translator calls the function
+// with copies of the arguments, it sets this to the guest's stack arguments for the call.
+inline thread_local void* g_guest_va_overflow_area = nullptr;
+
+struct GuestVaOverflowScope {
+    explicit GuestVaOverflowScope(void* area) : previous{g_guest_va_overflow_area} {
+        g_guest_va_overflow_area = area;
+    }
+    ~GuestVaOverflowScope() {
+        g_guest_va_overflow_area = previous;
+    }
+    GuestVaOverflowScope(const GuestVaOverflowScope&) = delete;
+    GuestVaOverflowScope& operator=(const GuestVaOverflowScope&) = delete;
+
+private:
+    void* previous;
+};
 
 // https://stackoverflow.com/questions/4958384/what-is-the-format-of-the-x86-64-va-list-structure
 

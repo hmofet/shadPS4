@@ -2,6 +2,7 @@
 #pragma once
 
 #include "common/types.h"
+#include "common/va_ctx.h"
 #include "guest_cpu.h"
 
 #include <array>
@@ -59,6 +60,11 @@ public:
     [[nodiscard]] u64 Operation() const noexcept { return operation; }
     [[nodiscard]] std::string_view Name() const noexcept { return name; }
     virtual HleCallResult Invoke(HleCallFrame& frame) const = 0;
+    /// False when the signature has an argument or return the adapter cannot marshal; every
+    /// call then fails with ENOTSUP.
+    [[nodiscard]] virtual bool IsSupported() const noexcept {
+        return true;
+    }
 
 private:
     friend class HleCallRegistry;
@@ -142,6 +148,13 @@ struct CallCursor final {
         return NextStackSlot();
     }
 
+    std::optional<std::array<u64, 2>> NextVector128() {
+        if (vector_index < 8) {
+            return frame.xmm[vector_index++];
+        }
+        return std::nullopt;
+    }
+
 private:
     std::optional<u64> NextStackSlot() {
         if (frame.rsp == 0 || frame.rsp > std::numeric_limits<std::uintptr_t>::max() - stack_offset ||
@@ -168,15 +181,38 @@ template <typename T>
 inline constexpr bool IsIntegerArgument = std::is_integral_v<T> || std::is_enum_v<T> ||
                                           IsGuestPointer<T>;
 
+// A 16-byte integer stands for __m128 (common/va_ctx.h defines it as __int128 off x86-64): the
+// full xmm register of a VA_ARGS function.
 template <typename T>
-inline constexpr bool IsVectorArgument = std::is_same_v<T, float> || std::is_same_v<T, double>;
+inline constexpr bool IsVector128Argument = [] {
+    if constexpr (std::is_integral_v<T>) {
+        return sizeof(T) == 2 * sizeof(u64);
+    }
+    return false;
+}();
+
+template <typename T>
+inline constexpr bool IsVectorArgument = std::is_same_v<T, float> || std::is_same_v<T, double> ||
+                                         IsVector128Argument<T>;
+
+// Trivially copyable structs of up to 8 bytes are passed and returned in one integer register
+// under the x86-64 SysV ABI when their fields are integers, as handle types such as
+// Common::SlotId are. A struct of floats would go in a vector register instead; none of the HLE
+// signatures use one.
+template <typename T>
+inline constexpr bool IsSmallAggregate = [] {
+    if constexpr (std::is_class_v<T> || std::is_union_v<T>) {
+        return std::is_trivially_copyable_v<T> && sizeof(T) <= sizeof(u64);
+    }
+    return false;
+}();
 
 template <typename T>
 inline constexpr bool FitsIntegerRegister = [] {
     if constexpr (IsIntegerArgument<T>) {
         return sizeof(T) <= sizeof(u64);
     }
-    return false;
+    return IsSmallAggregate<T>;
 }();
 
 template <typename T>
@@ -189,7 +225,13 @@ inline constexpr bool IsSupportedReturn = std::is_void_v<T> ||
 
 template <typename T>
 std::optional<T> DecodeArgument(CallCursor& cursor) {
-    if constexpr (IsVectorArgument<T>) {
+    if constexpr (IsVector128Argument<T>) {
+        const auto value = cursor.NextVector128();
+        if (!value) return std::nullopt;
+        T result{};
+        std::memcpy(&result, value->data(), sizeof(result));
+        return result;
+    } else if constexpr (IsVectorArgument<T>) {
         const auto value = cursor.NextVector();
         if (!value) return std::nullopt;
         T result{};
@@ -200,30 +242,18 @@ std::optional<T> DecodeArgument(CallCursor& cursor) {
         if (!value) return std::nullopt;
         return reinterpret_cast<T>(static_cast<std::uintptr_t>(*value));
     } else if constexpr (IsGuestPointer<T>) {
+        // Passed through unchecked, as a native x86-64 call would: an opaque void* is often a
+        // small integer (a thread argument, a callback cookie), and HLE handles live in host
+        // memory outside the guest VMM.
         const auto value = cursor.NextInteger();
         if (!value) return std::nullopt;
-        if (*value != 0) {
-            using PointedTo = std::remove_cv_t<std::remove_pointer_t<T>>;
-            constexpr std::size_t minimum_size = [] {
-                if constexpr (std::is_void_v<PointedTo> || !requires { sizeof(PointedTo); }) {
-                    return std::size_t{1};
-                } else {
-                    return sizeof(PointedTo);
-                }
-            }();
-            // Guest VMM only. HLE opaque handles (host new) live outside VMM;
-            // publish via PublishHostRange when possible. If still unmapped, allow
-            // non-null host-side addresses so FEX matches native x86 handle semantics.
-            if (cursor.frame.validate_range == nullptr ||
-                !cursor.frame.validate_range(cursor.frame.validate_context,
-                                             static_cast<std::uintptr_t>(*value), minimum_size,
-                                             !std::is_const_v<std::remove_pointer_t<T>>)) {
-                if (*value < 4096) {
-                    return std::nullopt;
-                }
-            }
-        }
         return reinterpret_cast<T>(static_cast<std::uintptr_t>(*value));
+    } else if constexpr (IsSmallAggregate<T>) {
+        const auto value = cursor.NextInteger();
+        if (!value) return std::nullopt;
+        T result{};
+        std::memcpy(&result, &*value, sizeof(result));
+        return result;
     } else {
         const auto value = cursor.NextInteger();
         if (!value) return std::nullopt;
@@ -240,6 +270,10 @@ void EncodeReturn(HleCallFrame& frame, Return&& value) {
         frame.xmm[0] = {bits, 0};
     } else if constexpr (IsGuestPointer<T>) {
         frame.gpr[0] = reinterpret_cast<std::uintptr_t>(value);
+    } else if constexpr (IsSmallAggregate<T>) {
+        u64 bits{};
+        std::memcpy(&bits, &value, sizeof(value));
+        frame.gpr[0] = bits;
     } else {
         frame.gpr[0] = static_cast<u64>(value);
     }
@@ -253,12 +287,19 @@ class TypedHleCallAdapter<Return (*)(Args...)> final : public HleCallAdapter {
 public:
     explicit TypedHleCallAdapter(Return (*function_)(Args...)) : function{function_} {}
 
+    [[nodiscard]] bool IsSupported() const noexcept override {
+        return (IsSupportedArgument<Args> && ...) && IsSupportedReturn<Return>;
+    }
+
     HleCallResult Invoke(HleCallFrame& frame) const override {
         if constexpr ((!IsSupportedArgument<Args> || ...) || !IsSupportedReturn<Return>) {
             return HleCallFailure{ENOTSUP, Name()};
         } else {
             CallCursor cursor{frame};
             std::tuple<std::optional<Args>...> decoded{DecodeArgument<Args>(cursor)...};
+            // Stack arguments start after the return address.
+            const Common::GuestVaOverflowScope va_scope{
+                frame.rsp == 0 ? nullptr : reinterpret_cast<void*>(frame.rsp + sizeof(u64))};
             if (!AllDecoded(decoded, std::index_sequence_for<Args...>{})) {
                 return HleCallFailure{EFAULT, Name()};
             }
