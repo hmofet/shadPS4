@@ -14,6 +14,9 @@
 
 namespace Core::Loader {
 
+SymbolsResolver::SymbolsResolver() = default;
+SymbolsResolver::~SymbolsResolver() = default;
+
 void SymbolsResolver::AddSymbol(const SymbolResolver& s, u64 virtual_addr) {
     m_symbols.emplace_back(GenerateName(s), s.nidName, virtual_addr);
 }

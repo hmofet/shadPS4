@@ -4,6 +4,11 @@
 #include "common/arch.h"
 #include "common/signal_context.h"
 
+#if defined(__linux__) && defined(ARCH_ARM64)
+#include <asm/sigcontext.h>
+#include <sys/ucontext.h>
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #elif defined(__FreeBSD__)
@@ -26,6 +31,8 @@ void* GetRip(void* ctx) {
     return (void*)((ucontext_t*)ctx)->uc_mcontext.mc_rip;
 #elif defined(ARCH_X86_64)
     return (void*)((ucontext_t*)ctx)->uc_mcontext.gregs[REG_RIP];
+#elif defined(__linux__) && defined(ARCH_ARM64)
+    return (void*)((ucontext_t*)ctx)->uc_mcontext.pc;
 #else
 #error "Unsupported architecture"
 #endif
@@ -42,6 +49,31 @@ bool IsWriteError(void* ctx) {
     return ((ucontext_t*)ctx)->uc_mcontext.mc_err & 0x2;
 #elif defined(ARCH_X86_64)
     return ((ucontext_t*)ctx)->uc_mcontext.gregs[REG_ERR] & 0x2;
+#elif defined(__linux__) && defined(ARCH_ARM64)
+    // The fault syndrome is in the ESR record of the signal frame's extension area;
+    // bit 6 (WnR) is set for a write.
+    const auto* context = static_cast<const ucontext_t*>(ctx);
+    const auto* record = context->uc_mcontext.__reserved;
+    const auto* const end = record + sizeof(context->uc_mcontext.__reserved);
+    while (static_cast<size_t>(end - record) >= sizeof(_aarch64_ctx)) {
+        const auto* header = reinterpret_cast<const _aarch64_ctx*>(record);
+        if (header->magic == 0 && header->size == 0) {
+            break;
+        }
+        const size_t remaining = end - record;
+        if (header->size < sizeof(*header) || header->size > remaining ||
+            (header->size % alignof(_aarch64_ctx)) != 0) {
+            return false;
+        }
+        if (header->magic == ESR_MAGIC) {
+            if (header->size < sizeof(esr_context)) {
+                return false;
+            }
+            return reinterpret_cast<const esr_context*>(record)->esr & 0x40;
+        }
+        record += header->size;
+    }
+    return false;
 #else
 #error "Unsupported architecture"
 #endif

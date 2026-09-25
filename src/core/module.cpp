@@ -15,6 +15,11 @@
 #include "core/memory.h"
 #include "core/module.h"
 #include "core/tls.h"
+#ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+#include "common/singleton.h"
+#include "core/guest_cpu/guest_cpu.h"
+#include "core/linker.h"
+#endif
 
 namespace Core {
 

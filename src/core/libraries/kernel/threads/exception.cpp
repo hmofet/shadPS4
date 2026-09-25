@@ -100,6 +100,10 @@ Ucontext::Ucontext(siginfo_t const* inf, ucontext_t* raw_context) {
     uc_mcontext.mc_rip = regs[REG_RIP];
     uc_mcontext.mc_addr = reinterpret_cast<uint64_t>(inf->si_addr);
 #endif
+#elif defined(ARCH_ARM64)
+    // The host context is the translator's ARM64 state, not the guest's x86-64
+    // registers; only the fault address carries over.
+    uc_mcontext.mc_addr = reinterpret_cast<uint64_t>(inf->si_addr);
 #else
 #error "ucontext_t conversion not implemented for current architecture."
 #endif
@@ -223,6 +227,8 @@ void Ucontext::SyncHostFromGuest() {
     // regs[REG_CSGSFS] |= (greg_t{uc_mcontext.mc_gs} << 16);
     regs[REG_RIP] = uc_mcontext.mc_rip;
 #endif
+#elif defined(ARCH_ARM64)
+    // Nothing to write back: see the constructor.
 #else
 #error "ucontext_t conversion not implemented for current architecture."
 #endif

@@ -48,8 +48,8 @@ struct SymbolResolver {
 
 class SymbolsResolver {
 public:
-    SymbolsResolver() = default;
-    virtual ~SymbolsResolver() = default;
+    SymbolsResolver();
+    virtual ~SymbolsResolver();
 
     void AddSymbol(const SymbolResolver& s, u64 virtual_addr);
 #ifdef SHADPS4_ENABLE_FEX_GUEST_CPU

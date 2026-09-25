@@ -162,7 +162,6 @@ static PS4_SYSV_ABI void* RunMainEntry [[noreturn]] (EntryParams* params) {
     UNREACHABLE_MSG("RunMainEntry requires an x86-64 host or FEX guest CPU support.");
 #endif
 #endif
-#endif
 }
 
 Linker::Linker() : memory{Memory::Instance()} {
