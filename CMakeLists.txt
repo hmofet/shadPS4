@@ -40,6 +40,24 @@ option(ENABLE_DISCORD_RPC "Enable the Discord RPC integration" ON)
 option(ENABLE_UPDATER "Enables the options to updater" ON)
 option(ENABLE_TESTS "Build unit tests (requires GTest)" OFF)
 option(ENABLE_SYSTEM_LIBRARIES "Enable building against system libraries" OFF)
+option(ENABLE_FEX_GUEST_CPU "Run guest code through FEXCore on an ARM64 host" OFF)
+set(FEXCORE_BUILD_DIR "" CACHE PATH "FEX build directory from scripts/build-fexcore.sh")
+set(FEXCORE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/externals/fex" CACHE PATH "FEX source checkout")
+
+# A cross build cannot run the glslang, font embedding and protoc executables it builds for the
+# target. Point this at a native build of the same tree that built those three targets.
+set(SHADPS4_HOST_TOOLS_DIR "" CACHE PATH "Native build directory providing build-time tools")
+if (CMAKE_CROSSCOMPILING AND SHADPS4_HOST_TOOLS_DIR)
+    set(SHADPS4_HOST_GLSLANG "${SHADPS4_HOST_TOOLS_DIR}/externals/glslang/StandAlone/glslang")
+    set(SHADPS4_HOST_FONT_EMBED "${SHADPS4_HOST_TOOLS_DIR}/src/imgui/renderer/Dear_ImGui_FontEmbed")
+    set(SHADPS4_HOST_PROTOC "${SHADPS4_HOST_TOOLS_DIR}/externals/protobuf/protoc")
+    foreach(tool IN ITEMS ${SHADPS4_HOST_GLSLANG} ${SHADPS4_HOST_FONT_EMBED} ${SHADPS4_HOST_PROTOC})
+        if (NOT EXISTS "${tool}")
+            message(FATAL_ERROR "Missing host tool ${tool}; build the glslang-standalone, "
+                                "Dear_ImGui_FontEmbed and protoc targets natively first")
+        endif()
+    endforeach()
+endif()
 
 # First, determine whether to use CMAKE_OSX_ARCHITECTURES or CMAKE_SYSTEM_PROCESSOR.
 if (APPLE AND CMAKE_OSX_ARCHITECTURES)
@@ -63,6 +81,34 @@ if (ARCHITECTURE STREQUAL "x86_64")
     # Target x86-64-v3 CPU architecture as this is a good balance between supporting performance critical
     # instructions like AVX2 and maintaining support for older CPUs.
     add_compile_options(-march=x86-64-v3)
+endif()
+
+if (ENABLE_FEX_GUEST_CPU)
+    if (NOT ARCHITECTURE STREQUAL "arm64")
+        message(FATAL_ERROR "ENABLE_FEX_GUEST_CPU needs an ARM64 host")
+    endif()
+    if (NOT FEXCORE_BUILD_DIR)
+        message(FATAL_ERROR "Set FEXCORE_BUILD_DIR; build it with scripts/build-fexcore.sh")
+    endif()
+    set(FEXCORE_LIBRARIES
+        "${FEXCORE_BUILD_DIR}/FEXCore/Source/libFEXCore.a"
+        "${FEXCORE_BUILD_DIR}/Source/Common/libCommon.a"
+        "${FEXCORE_BUILD_DIR}/Source/Tools/CommonTools/libCommonTools.a"
+        "${FEXCORE_BUILD_DIR}/FEXCore/Source/libJemallocLibs.a"
+        "${FEXCORE_BUILD_DIR}/Source/Common/cpp-optparse/libcpp-optparse.a"
+        "${FEXCORE_BUILD_DIR}/External/tiny-json/libtiny-json.a"
+        "${FEXCORE_BUILD_DIR}/FEXCore/Source/libFEXCore_Base.a"
+        "${FEXCORE_BUILD_DIR}/External/fmt/libfmt.a"
+        "${FEXCORE_BUILD_DIR}/External/xxhash/cmake_unofficial/libxxhash.a"
+        "${FEXCORE_BUILD_DIR}/External/cephes/libcephes_128bit.a"
+        "${FEXCORE_BUILD_DIR}/External/SoftFloat-3e/libsoftfloat_3e.a"
+        "${FEXCORE_BUILD_DIR}/External/rpmalloc/librpmalloc.a"
+    )
+    foreach(fex_library IN LISTS FEXCORE_LIBRARIES)
+        if (NOT EXISTS "${fex_library}")
+            message(FATAL_ERROR "Missing ${fex_library}; run scripts/build-fexcore.sh first")
+        endif()
+    endforeach()
 endif()
 
 cmake_host_system_information(RESULT PROC_INFO QUERY PROCESSOR_DESCRIPTION)
@@ -939,6 +985,8 @@ set(CORE src/core/aerolib/stubs.cpp
          src/core/linker.h
          src/core/memory.cpp
          src/core/memory.h
+         src/core/memory_map_generation.h
+         src/core/guest_call.h
          src/core/module.cpp
          src/core/module.h
          src/core/platform.h
@@ -963,6 +1011,26 @@ if (ARCHITECTURE STREQUAL "x86_64")
              src/core/cpu_patches.cpp
              src/core/cpu_patches.h
              ${FIBER_LIB})
+endif()
+
+if (ENABLE_FEX_GUEST_CPU)
+    list(APPEND CORE
+        src/core/fex/fex_guest_engine.cpp
+        src/core/fex/fex_guest_engine.h
+        src/core/guest_cpu/fex_guest_cpu.cpp
+        src/core/guest_cpu/fex_guest_cpu.h
+        src/core/guest_cpu/fex_hle_bridge.cpp
+        src/core/guest_cpu/fex_hle_bridge.h
+        src/core/guest_cpu/guest_callback.h
+        src/core/guest_cpu/guest_cpu.cpp
+        src/core/guest_cpu/guest_cpu.h
+        src/core/guest_cpu/guest_memory_validation_cache.h
+        src/core/guest_cpu/hle_call_adapter.cpp
+        src/core/guest_cpu/hle_call_adapter.h
+        src/core/guest_cpu/hle_trace.h
+        src/core/libraries/libc_internal/libc_internal_cxa.cpp
+        src/core/libraries/libc_internal/libc_internal_cxa.h
+    )
 endif()
 
 set(SHADER_RECOMPILER src/shader_recompiler/profile.h
@@ -1235,13 +1303,18 @@ set(EMULATOR src/emulator.cpp
 )
 
 # shadNet protobuf generation
+if (SHADPS4_HOST_PROTOC)
+    set(SHADNET_PROTOC ${SHADPS4_HOST_PROTOC})
+else()
+    set(SHADNET_PROTOC protobuf::protoc)
+endif()
 set(SHADNET_PROTO_OUT "${CMAKE_CURRENT_BINARY_DIR}/shadnet_proto_gen")
 file(MAKE_DIRECTORY "${SHADNET_PROTO_OUT}")
 add_custom_command(
     OUTPUT
         "${SHADNET_PROTO_OUT}/shadnet.pb.cc"
         "${SHADNET_PROTO_OUT}/shadnet.pb.h"
-    COMMAND protobuf::protoc
+    COMMAND ${SHADNET_PROTOC}
         "--proto_path=${CMAKE_CURRENT_SOURCE_DIR}/src/shadnet"
         "--cpp_out=${SHADNET_PROTO_OUT}"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/shadnet/shadnet.proto"
@@ -1287,6 +1360,43 @@ target_link_libraries(shadps4 PRIVATE magic_enum::magic_enum fmt::fmt toml11::to
 target_link_libraries(shadps4 PRIVATE Boost::headers GPUOpen::VulkanMemoryAllocator LibAtrac9 sirit Vulkan::Headers xxHash::xxhash Zydis::Zydis SDL3::SDL3 pugixml::pugixml)
 target_link_libraries(shadps4 PRIVATE stb::headers lfreist-hwinfo::hwinfo nlohmann_json::nlohmann_json miniz::miniz fdk-aac CLI11::CLI11 OpenAL::OpenAL Cpp_Httplib miniupnpc::miniupnpc)
 target_link_libraries(shadps4 PRIVATE Freetype::Freetype)
+
+if (ENABLE_FEX_GUEST_CPU)
+    target_compile_definitions(shadps4 PRIVATE
+        SHADPS4_ENABLE_FEX_GUEST_CPU=1
+        FEXCORE_HAS_PRESERVE_ALL_ATTR=1
+        FEX_HAS_PRESERVE_ALL_ATTR=1
+        FEX_DISABLE_TELEMETRY=1
+    )
+    target_compile_options(shadps4 PRIVATE
+        "-DFEXCORE_PRESERVE_ALL_ATTR=__attribute__((preserve_all))"
+        "-DFEX_PRESERVE_ALL_ATTR=__attribute__((preserve_all))"
+    )
+    target_include_directories(shadps4 PRIVATE
+        "${FEXCORE_BUILD_DIR}"
+        "${FEXCORE_BUILD_DIR}/Source"
+        "${FEXCORE_BUILD_DIR}/generated"
+        "${FEXCORE_BUILD_DIR}/FEXCore/Source"
+        "${FEXCORE_BUILD_DIR}/include"
+        "${FEXCORE_SOURCE_DIR}"
+        "${FEXCORE_SOURCE_DIR}/Source"
+        "${FEXCORE_SOURCE_DIR}/Source/Tools/CommonTools"
+        "${FEXCORE_SOURCE_DIR}/Source/Common/cpp-optparse"
+        "${FEXCORE_SOURCE_DIR}/FEXCore/include"
+        "${FEXCORE_SOURCE_DIR}/FEXHeaderUtils"
+        "${FEXCORE_SOURCE_DIR}/CodeEmitter"
+        "${FEXCORE_SOURCE_DIR}/External/unordered_dense/include"
+        "${FEXCORE_SOURCE_DIR}/External/fmt/include"
+        "${FEXCORE_SOURCE_DIR}/External/xxhash"
+        "${FEXCORE_SOURCE_DIR}/External/cephes/include"
+        "${FEXCORE_SOURCE_DIR}/External/SoftFloat-3e/include"
+        "${FEXCORE_SOURCE_DIR}/External/SoftFloat-3e/include/SoftFloat-3e"
+        "${FEXCORE_SOURCE_DIR}/External/tiny-json"
+        "${FEXCORE_SOURCE_DIR}/External/range-v3/include"
+        "${FEXCORE_SOURCE_DIR}/External/rpmalloc"
+    )
+    target_link_libraries(shadps4 PRIVATE ${FEXCORE_LIBRARIES} pthread dl)
+endif()
 target_link_libraries(shadps4 PRIVATE libprotobuf)
 target_link_libraries(shadps4 PRIVATE ZArchive::zarchive)
 target_include_directories(shadps4 PRIVATE "${SHADNET_PROTO_OUT}")

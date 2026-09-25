@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright 2023 Citra Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-if (TARGET glslang-standalone)
+if (SHADPS4_HOST_GLSLANG)
+    set(GLSLANG_COMPILER ${SHADPS4_HOST_GLSLANG})
+elseif (TARGET glslang-standalone)
     set(GLSLANG_COMPILER glslang-standalone)
 elseif (TARGET glslang::glslang-standalone)
     set(GLSLANG_COMPILER glslang::glslang-standalone)

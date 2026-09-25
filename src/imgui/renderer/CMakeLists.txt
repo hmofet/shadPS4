@@ -3,7 +3,12 @@
 
 project(ImGui_Resources)
 
-add_executable(Dear_ImGui_FontEmbed ${CMAKE_SOURCE_DIR}/externals/imgui/misc/fonts/binary_to_compressed_c.cpp)
+if (SHADPS4_HOST_FONT_EMBED)
+    set(FONT_EMBED ${SHADPS4_HOST_FONT_EMBED})
+else()
+    add_executable(Dear_ImGui_FontEmbed ${CMAKE_SOURCE_DIR}/externals/imgui/misc/fonts/binary_to_compressed_c.cpp)
+    set(FONT_EMBED Dear_ImGui_FontEmbed)
+endif()
 
 set(FONT_LIST
     NotoSansArabic-Regular.ttf
@@ -26,8 +31,8 @@ FOREACH (FONT_FILE ${FONT_LIST})
     add_custom_command(
         OUTPUT "${OUTPUT}.g.cpp"
         COMMAND ${CMAKE_COMMAND} -E make_directory "generated_fonts/imgui_fonts"
-        COMMAND $<TARGET_FILE:Dear_ImGui_FontEmbed> -nostatic "${CMAKE_CURRENT_SOURCE_DIR}/fonts/${FONT_FILE}" ${fontname_cpp} > "${OUTPUT}.g.cpp"
-        DEPENDS Dear_ImGui_FontEmbed "fonts/${FONT_FILE}"
+        COMMAND ${FONT_EMBED} -nostatic "${CMAKE_CURRENT_SOURCE_DIR}/fonts/${FONT_FILE}" ${fontname_cpp} > "${OUTPUT}.g.cpp"
+        DEPENDS ${FONT_EMBED} "fonts/${FONT_FILE}"
         USES_TERMINAL
     )
     list(APPEND OutputList "${OUTPUT}.g.cpp")
