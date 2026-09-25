@@ -23,6 +23,10 @@
 #include "shader_recompiler/ir/srt_gvn_table.h"
 #include "shader_recompiler/ir/value.h"
 
+#include <deque>
+#include <mutex>
+#include "core/memory.h"
+
 #ifdef ARCH_X86_64
 
 using namespace Xbyak::util;
@@ -119,6 +123,189 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
 
     return true;
 }
+
+} // namespace
+
+#else
+
+// Hosts without the x86-64 generator record the same walk as a small stack-machine program
+// (SrtOp) and interpret it in RunSrtProgram. walker_func then points at the program's words,
+// which keeps PersistentSrtInfo's serialization unchanged.
+
+namespace Shader {
+
+enum class SrtOp : u32 {
+    End,
+    PushFlat,   // push flat_dst[operand]
+    PushImm,    // push operand
+    Add,        // pop b, pop a, push a op b (32-bit, x86 semantics: shifts use count & 31)
+    Sub,
+    Mul,
+    Shl,
+    Shr,
+    And,
+    Or,
+    Xor,
+    UMin,
+    UMax,
+    Not,        // pop a, push ~a
+    Bfe,        // pop count, pop offset, pop base, push (base >> offset) & ((1 << count) - 1)
+    PushPtrImm, // push the 48-bit pointer at base + operand dwords
+    PushPtrDyn, // pop a dword offset, push the 48-bit pointer at base + offset dwords
+    PopPtr,
+    CopyImm,    // flat_dst[operand1] = dword at base + operand0 dwords
+    CopyDyn,    // pop a dword offset, flat_dst[operand] = dword at base + offset dwords
+};
+
+namespace {
+
+std::mutex g_srt_programs_mutex;
+std::deque<std::vector<u32>> g_srt_programs;
+
+// The x86-64 walker turns a fault on an unmapped pointer into a zero (SrtWalkerSignalHandler).
+// Here a read outside the guest's mappings yields zero instead.
+template <typename T>
+T ReadGuest(VAddr address) {
+    auto* memory = Core::Memory::Instance();
+    void* end{};
+    u32 prot{};
+    if (memory->QueryProtection(address, nullptr, &end, &prot) != 0) {
+        return 0;
+    }
+    if (address + sizeof(T) > reinterpret_cast<VAddr>(end) &&
+        memory->QueryProtection(reinterpret_cast<VAddr>(end), nullptr, nullptr, &prot) != 0) {
+        return 0;
+    }
+    T value;
+    std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(T));
+    return value;
+}
+
+} // namespace
+
+PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
+    ASSERT(size % sizeof(u32) == 0);
+    std::scoped_lock lk{g_srt_programs_mutex};
+    auto& program = g_srt_programs.emplace_back(size / sizeof(u32));
+    std::memcpy(program.data(), ptr, size);
+    return reinterpret_cast<PFN_SrtWalker>(program.data());
+}
+
+void RunSrtProgram(PFN_SrtWalker walker, const u32* user_data, u32* flat_dst) {
+    const u32* pc = reinterpret_cast<const u32*>(walker);
+    boost::container::small_vector<u32, 16> values;
+    // The first base is the user data array itself (host memory); later bases are guest
+    // pointers read from it.
+    boost::container::small_vector<VAddr, 8> bases{reinterpret_cast<VAddr>(user_data)};
+    const auto read_u32 = [&](VAddr address) -> u32 {
+        return bases.size() == 1 ? *reinterpret_cast<const u32*>(address)
+                                 : ReadGuest<u32>(address);
+    };
+    const auto read_ptr = [&](VAddr address) -> VAddr {
+        const u64 value = bases.size() == 1 ? *reinterpret_cast<const u64*>(address)
+                                            : ReadGuest<u64>(address);
+        return value & 0xFFFFFFFFFFFFULL;
+    };
+    const auto pop = [&] {
+        const u32 value = values.back();
+        values.pop_back();
+        return value;
+    };
+    const auto dword_at = [](VAddr base, u32 offset_dw) {
+        // x86-64: shl r32, 2 then zero-extend, so the byte offset wraps at 32 bits.
+        return base + static_cast<u32>(offset_dw << 2);
+    };
+    for (;;) {
+        const auto op = static_cast<SrtOp>(*pc++);
+        switch (op) {
+        case SrtOp::End:
+            return;
+        case SrtOp::PushFlat:
+            values.push_back(flat_dst[*pc++]);
+            break;
+        case SrtOp::PushImm:
+            values.push_back(*pc++);
+            break;
+        case SrtOp::Not:
+            values.back() = ~values.back();
+            break;
+        case SrtOp::Bfe: {
+            const u32 count = pop() & 31;
+            const u32 offset = pop() & 31;
+            const u32 base = pop();
+            values.push_back((base >> offset) & ((1U << count) - 1));
+            break;
+        }
+        case SrtOp::PushPtrImm:
+            bases.push_back(read_ptr(dword_at(bases.back(), *pc++)));
+            break;
+        case SrtOp::PushPtrDyn:
+            bases.push_back(read_ptr(dword_at(bases.back(), pop())));
+            break;
+        case SrtOp::PopPtr:
+            bases.pop_back();
+            break;
+        case SrtOp::CopyImm: {
+            const u32 src = *pc++;
+            const u32 dst = *pc++;
+            flat_dst[dst] = read_u32(dword_at(bases.back(), src));
+            break;
+        }
+        case SrtOp::CopyDyn: {
+            const u32 dst = *pc++;
+            flat_dst[dst] = read_u32(dword_at(bases.back(), pop()));
+            break;
+        }
+        default: {
+            const u32 b = pop();
+            const u32 a = pop();
+            u32 result{};
+            switch (op) {
+            case SrtOp::Add:
+                result = a + b;
+                break;
+            case SrtOp::Sub:
+                result = a - b;
+                break;
+            case SrtOp::Mul:
+                result = a * b;
+                break;
+            case SrtOp::Shl:
+                result = a << (b & 31);
+                break;
+            case SrtOp::Shr:
+                result = a >> (b & 31);
+                break;
+            case SrtOp::And:
+                result = a & b;
+                break;
+            case SrtOp::Or:
+                result = a | b;
+                break;
+            case SrtOp::Xor:
+                result = a ^ b;
+                break;
+            case SrtOp::UMin:
+                result = std::min(a, b);
+                break;
+            case SrtOp::UMax:
+                result = std::max(a, b);
+                break;
+            default:
+                UNREACHABLE_MSG("Invalid SRT walker op {}", static_cast<u32>(op));
+            }
+            values.push_back(result);
+            break;
+        }
+        }
+    }
+}
+
+} // namespace Shader
+
+#endif
+
+namespace {
 
 using namespace Shader;
 
@@ -217,13 +404,40 @@ static inline void SetFlatbufOffset(IR::Inst* inst, u16 offset) {
     UNREACHABLE_MSG("Instruction not supported");
 }
 
-static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
-                          const IR::Value& off_dw);
+static bool IsAllowedOffsetInstruction(const IR::Inst* inst) {
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::GetUserData:
+    case IR::Opcode::ReadConst:
+    case IR::Opcode::ReadConstBuffer:
+    case IR::Opcode::IAdd32:
+    case IR::Opcode::ISub32:
+    case IR::Opcode::IMul32:
+    case IR::Opcode::ShiftLeftLogical32:
+    case IR::Opcode::ShiftRightLogical32:
+    case IR::Opcode::BitwiseAnd32:
+    case IR::Opcode::BitwiseOr32:
+    case IR::Opcode::BitwiseXor32:
+    case IR::Opcode::BitwiseNot32:
+    case IR::Opcode::UMin32:
+    case IR::Opcode::UMax32:
+    case IR::Opcode::BitFieldUExtract:
+        return true;
+    default:
+        return false;
+    }
+}
 
 #define ABORT_ON_FAILURE(expr)                                                                     \
     if (!(expr)) {                                                                                 \
         return false;                                                                              \
     }
+
+#ifdef ARCH_X86_64
+
+
+static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
+                          const IR::Value& off_dw);
+
 
 #define POP_ABORT_ON_FAILURE(expr)                                                                 \
     if (!(expr)) {                                                                                 \
@@ -485,28 +699,6 @@ static bool EmitComputeOffsetBitFieldUExtract(Xbyak::CodeGenerator& c, Xbyak::Re
     return true;
 }
 
-static bool IsAllowedOffsetInstruction(const IR::Inst* inst) {
-    switch (inst->GetOpcode()) {
-    case IR::Opcode::GetUserData:
-    case IR::Opcode::ReadConst:
-    case IR::Opcode::ReadConstBuffer:
-    case IR::Opcode::IAdd32:
-    case IR::Opcode::ISub32:
-    case IR::Opcode::IMul32:
-    case IR::Opcode::ShiftLeftLogical32:
-    case IR::Opcode::ShiftRightLogical32:
-    case IR::Opcode::BitwiseAnd32:
-    case IR::Opcode::BitwiseOr32:
-    case IR::Opcode::BitwiseXor32:
-    case IR::Opcode::BitwiseNot32:
-    case IR::Opcode::UMin32:
-    case IR::Opcode::UMax32:
-    case IR::Opcode::BitFieldUExtract:
-        return true;
-    default:
-        return false;
-    }
-}
 
 static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
                           const IR::Value& off_dw) {
@@ -670,6 +862,154 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
 
     info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
 }
+
+#else
+
+using SrtCode = std::vector<u32>;
+
+static void Emit(SrtCode& c, SrtOp op) {
+    c.push_back(static_cast<u32>(op));
+}
+
+static bool ComputeOffset(SrtCode& c, PassInfo& pass_info, const IR::Value& off_dw);
+
+static bool EmitOperand(SrtCode& c, PassInfo& pass_info, const IR::Value& value) {
+    if (value.IsImmediate()) {
+        Emit(c, SrtOp::PushImm);
+        c.push_back(value.U32());
+        return true;
+    }
+    return ComputeOffset(c, pass_info, value);
+}
+
+static bool EmitOperands(SrtCode& c, PassInfo& pass_info, IR::Inst* inst, SrtOp op) {
+    ASSERT(!inst->AreAllArgsImmediates());
+    for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+        ABORT_ON_FAILURE(EmitOperand(c, pass_info, inst->Arg(arg)));
+    }
+    Emit(c, op);
+    return true;
+}
+
+static bool ComputeOffset(SrtCode& c, PassInfo& pass_info, const IR::Value& off_dw) {
+    auto inst = off_dw.Inst();
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::GetUserData:
+        Emit(c, SrtOp::PushFlat);
+        c.push_back(static_cast<u32>(inst->Arg(0).ScalarReg()));
+        return true;
+    case IR::Opcode::ReadConst:
+    case IR::Opcode::ReadConstBuffer:
+        if (u16 offset = GetFlatbufOffset(pass_info.DeduplicateInstruction(inst)); offset != 0) {
+            Emit(c, SrtOp::PushFlat);
+            c.push_back(offset);
+            return true;
+        }
+        return false;
+    case IR::Opcode::IAdd32:
+        return EmitOperands(c, pass_info, inst, SrtOp::Add);
+    case IR::Opcode::ISub32:
+        return EmitOperands(c, pass_info, inst, SrtOp::Sub);
+    case IR::Opcode::IMul32:
+        return EmitOperands(c, pass_info, inst, SrtOp::Mul);
+    case IR::Opcode::ShiftLeftLogical32:
+        return EmitOperands(c, pass_info, inst, SrtOp::Shl);
+    case IR::Opcode::ShiftRightLogical32:
+        return EmitOperands(c, pass_info, inst, SrtOp::Shr);
+    case IR::Opcode::BitwiseAnd32:
+        return EmitOperands(c, pass_info, inst, SrtOp::And);
+    case IR::Opcode::BitwiseOr32:
+        return EmitOperands(c, pass_info, inst, SrtOp::Or);
+    case IR::Opcode::BitwiseXor32:
+        return EmitOperands(c, pass_info, inst, SrtOp::Xor);
+    case IR::Opcode::BitwiseNot32:
+        return EmitOperands(c, pass_info, inst, SrtOp::Not);
+    case IR::Opcode::UMin32:
+        return EmitOperands(c, pass_info, inst, SrtOp::UMin);
+    case IR::Opcode::UMax32:
+        return EmitOperands(c, pass_info, inst, SrtOp::UMax);
+    case IR::Opcode::BitFieldUExtract:
+        return EmitOperands(c, pass_info, inst, SrtOp::Bfe);
+    default:
+        LOG_ERROR(Render_Recompiler, "Unexpected instruction for offset computation, {}",
+                  magic_enum::enum_name(inst->GetOpcode()));
+        return false;
+    }
+}
+
+static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& pass_info,
+                         SrtCode& c) {
+    if (subtree->GetOpcode() == IR::Opcode::ReadConst && subtree->Flags<u16>() == 0 ||
+        subtree->GetOpcode() == IR::Opcode::ReadConstBuffer &&
+            subtree->Flags<IR::BufferInstInfo>().flatbuf_off_dw == 0) {
+        return;
+    }
+
+    const size_t mark = c.size();
+    if (off_dw.IsImmediate()) {
+        Emit(c, SrtOp::PushPtrImm);
+        c.push_back(off_dw.U32());
+    } else if (ComputeOffset(c, pass_info, off_dw)) {
+        Emit(c, SrtOp::PushPtrDyn);
+    } else {
+        c.resize(mark);
+        LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+        return;
+    }
+    PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
+    ASSERT(use_list);
+
+    // As in the x86-64 generator: this level's data first, so data contiguous in the guest SRT
+    // stays contiguous in the flattened buffer, then the children used as pointers.
+    for (auto [src_off_dw, use] : *use_list) {
+        const size_t copy_mark = c.size();
+        if (src_off_dw.IsImmediate()) {
+            Emit(c, SrtOp::CopyImm);
+            c.push_back(src_off_dw.U32());
+        } else {
+            if (!ComputeOffset(c, pass_info, src_off_dw)) {
+                c.resize(copy_mark);
+                LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+                continue;
+            }
+            Emit(c, SrtOp::CopyDyn);
+        }
+        c.push_back(pass_info.dst_off_dw);
+
+        SetFlatbufOffset(use, pass_info.dst_off_dw);
+        pass_info.dst_off_dw++;
+    }
+
+    for (const auto [src_off_dw, use] : *use_list) {
+        if (pass_info.GetUsesAsPointer(use)) {
+            VisitPointer(src_off_dw, use, pass_info, c);
+        }
+    }
+
+    Emit(c, SrtOp::PopPtr);
+}
+
+static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
+    if (pass_info.srt_roots.empty()) {
+        return;
+    }
+
+    SrtCode code;
+    pass_info.dst_off_dw = NUM_USER_DATA_REGS;
+    ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
+
+    for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
+        VisitPointer(IR::Value(static_cast<u32>(sgpr_base)), root, pass_info, code);
+    }
+    Emit(code, SrtOp::End);
+
+    info.srt_info.walker_func_size = code.size() * sizeof(u32);
+    info.srt_info.walker_func =
+        RegisterWalkerCode(reinterpret_cast<const u8*>(code.data()), info.srt_info.walker_func_size);
+    info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
+}
+
+#endif
 
 static bool IsReadConstSource(const IR::Value base) {
     auto* inst = base.TryInst();
@@ -861,23 +1201,3 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
 }
 
 } // namespace Shader::Optimization
-
-#else
-
-namespace Shader {
-
-PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
-    UNREACHABLE_MSG("RegisterWalkerCode unimplemented for target architecture.");
-}
-
-namespace Optimization {
-
-void FlattenExtendedUserdataPass(IR::Program& program) {
-    UNREACHABLE_MSG("FlattenExtendedUserdataPass unimplemented for target architecture.");
-}
-
-} // namespace Optimization
-
-} // namespace Shader
-
-#endif
